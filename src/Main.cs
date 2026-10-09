@@ -25,7 +25,7 @@ namespace PracticeStats
             modEntry.OnGUI = OnGUI;
             modEntry.OnSaveGUI = OnSaveGUI;
             modEntry.OnUnload = OnUnload;
-            Log("PracticeStats v0.4.7 loaded (ADOFAI 3.4.0 target).");
+            Log("PracticeStats v0.4.8 loaded (ADOFAI 3.4.0 target).");
             return true;
         }
 
@@ -81,7 +81,7 @@ namespace PracticeStats
             {
                 SyncRangeFromEditor(false);
 
-                RGui.Label("PracticeStats v0.4.7 - ADOFAI 3.4.0");
+                RGui.Label("PracticeStats v0.4.8 - ADOFAI 3.4.0");
                 RGui.Label("Uses ADOFAI built-in practice mode");
                 RGui.Label("Range: editor Shift + Left Click selection");
                 RGui.Space(6f);
@@ -1712,6 +1712,7 @@ namespace PracticeStats
     internal static class RuntimeOverlay
     {
         private static object rootObject;
+        private static object panelObject;
         private static object textComponent;
         private static MethodInfo setActiveMethod;
         private static PropertyInfo textProperty;
@@ -1743,25 +1744,46 @@ namespace PracticeStats
 
         private static bool EnsureCreated()
         {
-            if (rootObject != null && textComponent != null &&
-                setActiveMethod != null && textProperty != null)
+            if (rootObject != null && panelObject != null &&
+                textComponent != null && setActiveMethod != null &&
+                textProperty != null)
                 return true;
 
             if (creationFailed) return false;
 
             try
             {
-                Type gameObjectType = Type.GetType("UnityEngine.GameObject, UnityEngine.CoreModule", false);
-                Type rectTransformType = Type.GetType("UnityEngine.RectTransform, UnityEngine.CoreModule", false);
-                Type transformType = Type.GetType("UnityEngine.Transform, UnityEngine.CoreModule", false);
-                Type vector2Type = Type.GetType("UnityEngine.Vector2, UnityEngine.CoreModule", false);
-                Type canvasType = Type.GetType("UnityEngine.Canvas, UnityEngine.UIModule", false);
-                Type textType = Type.GetType("UnityEngine.UI.Text, UnityEngine.UI", false);
-                Type fontType = Type.GetType("UnityEngine.Font, UnityEngine.TextRenderingModule", false);
+                Type gameObjectType = Type.GetType(
+                    "UnityEngine.GameObject, UnityEngine.CoreModule", false);
+
+                Type rectTransformType = Type.GetType(
+                    "UnityEngine.RectTransform, UnityEngine.CoreModule", false);
+
+                Type transformType = Type.GetType(
+                    "UnityEngine.Transform, UnityEngine.CoreModule", false);
+
+                Type vector2Type = Type.GetType(
+                    "UnityEngine.Vector2, UnityEngine.CoreModule", false);
+
+                Type colorType = Type.GetType(
+                    "UnityEngine.Color, UnityEngine.CoreModule", false);
+
+                Type canvasType = Type.GetType(
+                    "UnityEngine.Canvas, UnityEngine.UIModule", false);
+
+                Type textType = Type.GetType(
+                    "UnityEngine.UI.Text, UnityEngine.UI", false);
+
+                Type imageType = Type.GetType(
+                    "UnityEngine.UI.Image, UnityEngine.UI", false);
+
+                Type fontType = Type.GetType(
+                    "UnityEngine.Font, UnityEngine.TextRenderingModule", false);
 
                 if (gameObjectType == null || rectTransformType == null ||
                     transformType == null || vector2Type == null ||
-                    canvasType == null || textType == null)
+                    colorType == null || canvasType == null ||
+                    textType == null || imageType == null)
                 {
                     creationFailed = true;
                     return false;
@@ -1800,20 +1822,81 @@ namespace PracticeStats
                     "transform",
                     BindingFlags.Public | BindingFlags.Instance);
 
-                if (setActiveMethod == null || getComponent == null || transformProperty == null)
-                    throw new MissingMethodException("Required GameObject API was not found.");
+                if (setActiveMethod == null ||
+                    getComponent == null ||
+                    transformProperty == null)
+                    throw new MissingMethodException(
+                        "Required GameObject API was not found.");
 
-                object canvas = getComponent.Invoke(rootObject, new object[] { canvasType });
-                PropertyInfo renderMode = canvasType.GetProperty("renderMode", BindingFlags.Public | BindingFlags.Instance);
+                object canvas = getComponent.Invoke(
+                    rootObject,
+                    new object[] { canvasType });
+
+                PropertyInfo renderMode = canvasType.GetProperty(
+                    "renderMode",
+                    BindingFlags.Public | BindingFlags.Instance);
+
                 if (renderMode != null)
                 {
-                    object mode = Enum.Parse(renderMode.PropertyType, "ScreenSpaceOverlay", true);
+                    object mode = Enum.Parse(
+                        renderMode.PropertyType,
+                        "ScreenSpaceOverlay",
+                        true);
+
                     renderMode.SetValue(canvas, mode, null);
                 }
 
-                PropertyInfo sortingOrder = canvasType.GetProperty("sortingOrder", BindingFlags.Public | BindingFlags.Instance);
+                PropertyInfo sortingOrder = canvasType.GetProperty(
+                    "sortingOrder",
+                    BindingFlags.Public | BindingFlags.Instance);
+
                 if (sortingOrder != null)
                     sortingOrder.SetValue(canvas, 5000, null);
+
+                MethodInfo setParent = transformType
+                    .GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                    .FirstOrDefault(m =>
+                    {
+                        if (m.Name != "SetParent") return false;
+                        ParameterInfo[] p = m.GetParameters();
+
+                        return p.Length == 2 &&
+                               p[0].ParameterType == transformType &&
+                               p[1].ParameterType == typeof(bool);
+                    });
+
+                if (setParent == null)
+                    throw new MissingMethodException(
+                        "Transform.SetParent was not found.");
+
+                object rootTransform =
+                    transformProperty.GetValue(rootObject, null);
+
+                // Opaque black panel behind the white overlay text.
+                panelObject = goCtor.Invoke(new object[]
+                {
+                    "PracticeStatsPanel",
+                    new Type[] { rectTransformType, imageType }
+                });
+
+                object panelTransform =
+                    transformProperty.GetValue(panelObject, null);
+
+                setParent.Invoke(
+                    panelTransform,
+                    new object[] { rootTransform, false });
+
+                object panelRect = getComponent.Invoke(
+                    panelObject,
+                    new object[] { rectTransformType });
+
+                object panelImage = getComponent.Invoke(
+                    panelObject,
+                    new object[] { imageType });
+
+                if (panelRect == null || panelImage == null)
+                    throw new InvalidOperationException(
+                        "Overlay panel components could not be created.");
 
                 object textObject = goCtor.Invoke(new object[]
                 {
@@ -1821,60 +1904,99 @@ namespace PracticeStats
                     new Type[] { rectTransformType, textType }
                 });
 
-                object rootTransform = transformProperty.GetValue(rootObject, null);
-                object childTransform = transformProperty.GetValue(textObject, null);
+                object textTransform =
+                    transformProperty.GetValue(textObject, null);
 
-                MethodInfo setParent = transformType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
-                    .FirstOrDefault(m =>
-                    {
-                        if (m.Name != "SetParent") return false;
-                        ParameterInfo[] p = m.GetParameters();
-                        return p.Length == 2 &&
-                               p[0].ParameterType == transformType &&
-                               p[1].ParameterType == typeof(bool);
-                    });
+                setParent.Invoke(
+                    textTransform,
+                    new object[] { panelTransform, false });
 
-                if (setParent == null)
-                    throw new MissingMethodException("Transform.SetParent was not found.");
+                object textRect = getComponent.Invoke(
+                    textObject,
+                    new object[] { rectTransformType });
 
-                setParent.Invoke(childTransform, new object[] { rootTransform, false });
+                textComponent = getComponent.Invoke(
+                    textObject,
+                    new object[] { textType });
 
-                object rect = getComponent.Invoke(textObject, new object[] { rectTransformType });
-                textComponent = getComponent.Invoke(textObject, new object[] { textType });
-
-                if (rect == null || textComponent == null)
-                    throw new InvalidOperationException("Overlay UI components could not be created.");
+                if (textRect == null || textComponent == null)
+                    throw new InvalidOperationException(
+                        "Overlay text components could not be created.");
 
                 ConstructorInfo v2Ctor = vector2Type.GetConstructor(
                     new[] { typeof(float), typeof(float) });
 
-                if (v2Ctor == null)
-                    throw new MissingMethodException("Vector2 constructor was not found.");
+                ConstructorInfo colorCtor = colorType.GetConstructor(
+                    new[]
+                    {
+                        typeof(float),
+                        typeof(float),
+                        typeof(float),
+                        typeof(float)
+                    });
 
-                object topRight = v2Ctor.Invoke(new object[] { 1f, 1f });
-                // Slightly lower than v0.3.0.
-                object position = v2Ctor.Invoke(new object[] { -24f, -125f });
-                object size = v2Ctor.Invoke(new object[] { 340f, 200f });
+                if (v2Ctor == null || colorCtor == null)
+                    throw new MissingMethodException(
+                        "Vector2/Color constructor was not found.");
 
-                SetProperty(rect, "anchorMin", topRight);
-                SetProperty(rect, "anchorMax", topRight);
-                SetProperty(rect, "pivot", topRight);
-                SetProperty(rect, "anchoredPosition", position);
-                SetProperty(rect, "sizeDelta", size);
+                object topRight =
+                    v2Ctor.Invoke(new object[] { 1f, 1f });
 
-                textProperty = textType.GetProperty("text", BindingFlags.Public | BindingFlags.Instance);
+                // Keep the overlay at the same general position as v0.4.7,
+                // but give the text a little breathing room inside the panel.
+                object panelPosition =
+                    v2Ctor.Invoke(new object[] { -18f, -117f });
+
+                object panelSize =
+                    v2Ctor.Invoke(new object[] { 370f, 224f });
+
+                object textPosition =
+                    v2Ctor.Invoke(new object[] { -14f, -12f });
+
+                object textSize =
+                    v2Ctor.Invoke(new object[] { 342f, 198f });
+
+                SetProperty(panelRect, "anchorMin", topRight);
+                SetProperty(panelRect, "anchorMax", topRight);
+                SetProperty(panelRect, "pivot", topRight);
+                SetProperty(panelRect, "anchoredPosition", panelPosition);
+                SetProperty(panelRect, "sizeDelta", panelSize);
+
+                SetProperty(textRect, "anchorMin", topRight);
+                SetProperty(textRect, "anchorMax", topRight);
+                SetProperty(textRect, "pivot", topRight);
+                SetProperty(textRect, "anchoredPosition", textPosition);
+                SetProperty(textRect, "sizeDelta", textSize);
+
+                // Fully opaque black, as requested.
+                object black = colorCtor.Invoke(
+                    new object[] { 0f, 0f, 0f, 1f });
+
+                SetProperty(panelImage, "color", black);
+                SetProperty(panelImage, "raycastTarget", false);
+
+                textProperty = textType.GetProperty(
+                    "text",
+                    BindingFlags.Public | BindingFlags.Instance);
+
                 SetProperty(textComponent, "fontSize", 22);
+                SetProperty(textComponent, "raycastTarget", false);
                 SetEnumProperty(textComponent, "alignment", "UpperRight");
                 SetEnumProperty(textComponent, "horizontalOverflow", "Overflow");
                 SetEnumProperty(textComponent, "verticalOverflow", "Overflow");
 
                 if (fontType != null)
                 {
-                    MethodInfo createFont = fontType.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                    MethodInfo createFont =
+                        fontType.GetMethods(
+                            BindingFlags.Public | BindingFlags.Static)
                         .FirstOrDefault(m =>
                         {
-                            if (m.Name != "CreateDynamicFontFromOSFont") return false;
+                            if (m.Name != "CreateDynamicFontFromOSFont")
+                                return false;
+
                             ParameterInfo[] p = m.GetParameters();
+
                             return p.Length == 2 &&
                                    p[0].ParameterType == typeof(string) &&
                                    p[1].ParameterType == typeof(int);
@@ -1882,13 +2004,19 @@ namespace PracticeStats
 
                     if (createFont != null)
                     {
-                        object font = createFont.Invoke(null, new object[] { "Arial", 22 });
+                        object font = createFont.Invoke(
+                            null,
+                            new object[] { "Arial", 22 });
+
                         if (font != null)
                             SetProperty(textComponent, "font", font);
                     }
                 }
 
-                setActiveMethod.Invoke(rootObject, new object[] { false });
+                setActiveMethod.Invoke(
+                    rootObject,
+                    new object[] { false });
+
                 return textProperty != null;
             }
             catch (Exception ex)
@@ -1900,33 +2028,49 @@ namespace PracticeStats
             }
         }
 
-        private static void SetProperty(object target, string name, object value)
+        private static void SetProperty(
+            object target,
+            string name,
+            object value)
         {
             if (target == null) return;
-            PropertyInfo property = target.GetType().GetProperty(
-                name, BindingFlags.Public | BindingFlags.Instance);
+
+            PropertyInfo property =
+                target.GetType().GetProperty(
+                    name,
+                    BindingFlags.Public | BindingFlags.Instance);
 
             if (property != null && property.CanWrite)
                 property.SetValue(target, value, null);
         }
 
-        private static void SetEnumProperty(object target, string name, string enumName)
+        private static void SetEnumProperty(
+            object target,
+            string name,
+            string enumName)
         {
             if (target == null) return;
 
-            PropertyInfo property = target.GetType().GetProperty(
-                name, BindingFlags.Public | BindingFlags.Instance);
+            PropertyInfo property =
+                target.GetType().GetProperty(
+                    name,
+                    BindingFlags.Public | BindingFlags.Instance);
 
-            if (property == null || !property.CanWrite || !property.PropertyType.IsEnum)
+            if (property == null ||
+                !property.CanWrite ||
+                !property.PropertyType.IsEnum)
                 return;
 
-            object value = Enum.Parse(property.PropertyType, enumName, true);
+            object value =
+                Enum.Parse(property.PropertyType, enumName, true);
+
             property.SetValue(target, value, null);
         }
 
         private static void ResetReferences()
         {
             rootObject = null;
+            panelObject = null;
             textComponent = null;
             setActiveMethod = null;
             textProperty = null;
