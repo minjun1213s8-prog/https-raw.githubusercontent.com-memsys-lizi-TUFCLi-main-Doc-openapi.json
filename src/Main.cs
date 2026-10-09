@@ -716,18 +716,165 @@ namespace PracticeStats
             CurrentStreak++;
             if (CurrentStreak > BestStreak)
                 BestStreak = CurrentStreak;
+
+            // Editor practice bypasses ADOFAI's normal custom-level launch
+            // flow, so the game's persisted CustomWorld_{hash}_Attempts value
+            // is not incremented automatically. Count every finished practice
+            // attempt here, including clears.
+            MapAttemptPersistence.IncrementCurrentMapAttempt();
         }
 
         private void RecordFail()
         {
             Failures++;
             CurrentStreak = 0;
+
+            // Failures must contribute to the same per-map attempt counter.
+            MapAttemptPersistence.IncrementCurrentMapAttempt();
         }
 
         private static bool ContainsState(string state, string token)
         {
             return !string.IsNullOrEmpty(state) &&
                    state.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+    }
+
+    internal static class MapAttemptPersistence
+    {
+        private static Type adoBaseType;
+        private static MemberInfo customLevelMember;
+        private static Type persistenceType;
+        private static MethodInfo incrementAttemptsMethod;
+        private static bool resolved;
+        private static bool loggedFailure;
+
+        public static bool IncrementCurrentMapAttempt()
+        {
+            Resolve();
+
+            try
+            {
+                if (adoBaseType == null ||
+                    customLevelMember == null ||
+                    persistenceType == null ||
+                    incrementAttemptsMethod == null)
+                {
+                    LogFailureOnce("required ADOFAI persistence API was not found");
+                    return false;
+                }
+
+                object customLevel =
+                    ReflectionUtil.ReadMember(null, customLevelMember);
+
+                if (customLevel == null)
+                {
+                    LogFailureOnce("ADOBase.customLevel is null");
+                    return false;
+                }
+
+                const BindingFlags all =
+                    BindingFlags.Public | BindingFlags.NonPublic |
+                    BindingFlags.Static | BindingFlags.Instance;
+
+                MemberInfo levelDataMember =
+                    ReflectionUtil.FindMember(customLevel.GetType(), "levelData", all);
+
+                if (levelDataMember == null)
+                {
+                    LogFailureOnce("customLevel.levelData was not found");
+                    return false;
+                }
+
+                object levelData =
+                    ReflectionUtil.ReadMember(customLevel, levelDataMember);
+
+                if (levelData == null)
+                {
+                    LogFailureOnce("customLevel.levelData is null");
+                    return false;
+                }
+
+                MemberInfo hashMember =
+                    ReflectionUtil.FindMember(levelData.GetType(), "Hash", all) ??
+                    ReflectionUtil.FindMember(levelData.GetType(), "hash", all);
+
+                if (hashMember == null)
+                {
+                    LogFailureOnce("levelData.Hash was not found");
+                    return false;
+                }
+
+                object rawHash =
+                    ReflectionUtil.ReadMember(levelData, hashMember);
+
+                string hash = rawHash == null ? null : rawHash.ToString();
+
+                if (string.IsNullOrEmpty(hash))
+                {
+                    LogFailureOnce("current custom-level hash is empty");
+                    return false;
+                }
+
+                // This is ADOFAI's own persistent map-attempt API:
+                // Persistence.IncrementCustomWorldAttempts(hash)
+                // -> CustomWorld_{hash}_Attempts += 1
+                // -> Persistence.Save().
+                incrementAttemptsMethod.Invoke(
+                    null,
+                    new object[] { hash });
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogFailureOnce("exception: " + ex.Message);
+                return false;
+            }
+        }
+
+        private static void Resolve()
+        {
+            if (resolved) return;
+            resolved = true;
+
+            const BindingFlags all =
+                BindingFlags.Public | BindingFlags.NonPublic |
+                BindingFlags.Static | BindingFlags.Instance;
+
+            adoBaseType = ReflectionUtil.FindType("ADOBase");
+            if (adoBaseType != null)
+            {
+                customLevelMember =
+                    ReflectionUtil.FindMember(
+                        adoBaseType,
+                        "customLevel",
+                        all);
+            }
+
+            persistenceType = ReflectionUtil.FindType("Persistence");
+            if (persistenceType != null)
+            {
+                incrementAttemptsMethod =
+                    persistenceType.GetMethods(all)
+                    .FirstOrDefault(m =>
+                    {
+                        if (m.Name != "IncrementCustomWorldAttempts")
+                            return false;
+
+                        ParameterInfo[] p = m.GetParameters();
+
+                        return p.Length == 1 &&
+                               p[0].ParameterType == typeof(string);
+                    });
+            }
+        }
+
+        private static void LogFailureOnce(string reason)
+        {
+            if (loggedFailure) return;
+            loggedFailure = true;
+            Main.Log("Map attempt persistence unavailable: " + reason);
         }
     }
 
