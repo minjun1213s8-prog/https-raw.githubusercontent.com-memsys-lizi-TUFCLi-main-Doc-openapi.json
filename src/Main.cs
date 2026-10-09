@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -11,10 +12,10 @@ namespace PracticeStats
         private static UnityModManager.ModEntry mod;
         private static bool enabled = true;
         private static readonly PracticeSession session = new PracticeSession();
-        private static string startText = "0";
-        private static string endText = "1";
         private static string attemptsText = "100";
-        private static string status = "Ready";
+        private static string status = "Select a range with Shift + Left Click";
+        private static bool hasEditorRange;
+        private static int selectedCount;
 
         public static bool Load(UnityModManager.ModEntry modEntry)
         {
@@ -24,7 +25,7 @@ namespace PracticeStats
             modEntry.OnGUI = OnGUI;
             modEntry.OnSaveGUI = OnSaveGUI;
             modEntry.OnUnload = OnUnload;
-            Log("PracticeStats v0.1.3 loaded (ADOFAI 3.4.0 target).");
+            Log("PracticeStats v0.2.0 loaded (ADOFAI 3.4.0 target).");
             return true;
         }
 
@@ -48,14 +49,15 @@ namespace PracticeStats
             if (!enabled) return;
             try
             {
-                if (UnityBridge.GetKeyDown("F6")) SetStartFromCurrent();
-                if (UnityBridge.GetKeyDown("F7")) SetEndFromCurrent();
+                SyncRangeFromEditor(false);
+
                 if (UnityBridge.GetKeyDown("F8")) TogglePractice();
                 if (UnityBridge.GetKeyDown("F9"))
                 {
                     session.ResetStats();
                     status = "Stats reset";
                 }
+
                 session.Tick();
                 if (session.Completed) status = "Completed";
             }
@@ -69,21 +71,23 @@ namespace PracticeStats
         {
             try
             {
+                SyncRangeFromEditor(false);
+
                 RGui.Label("PracticeStats - ADOFAI 3.4.0");
-                RGui.Label("Section practice success-rate tracker");
+                RGui.Label("Range source: editor selection (Shift + Left Click)");
                 RGui.Space(6f);
 
-                int current = GameBridge.CurrentFloor();
-                RGui.Label("Current tile: " + (current >= 0 ? current.ToString() : "-"));
+                if (hasEditorRange)
+                {
+                    RGui.Label("Selected range: " + session.StartFloor + " -> " + session.EndFloor + " (" + selectedCount + " tiles selected)");
+                }
+                else
+                {
+                    RGui.Label("Selected range: none");
+                    RGui.Label("In the level editor, select a tile range with Shift + Left Click.");
+                }
 
-                RGui.Label("Start tile");
-                startText = RGui.TextField(startText);
-                if (RGui.Button("Use current as start")) SetStartFromCurrent();
-
-                RGui.Label("End tile");
-                endText = RGui.TextField(endText);
-                if (RGui.Button("Use current as end")) SetEndFromCurrent();
-
+                RGui.Space(6f);
                 RGui.Label("Target attempts");
                 attemptsText = RGui.TextField(attemptsText);
 
@@ -96,14 +100,13 @@ namespace PracticeStats
                 }
 
                 RGui.Space(8f);
-                RGui.Label("Range: " + session.StartFloor + " -> " + session.EndFloor);
                 RGui.Label("Attempts: " + session.TotalAttempts + " / " + session.TargetAttempts);
                 RGui.Label("Success: " + session.Successes + "    Fail: " + session.Failures);
                 RGui.Label("Success rate: " + session.SuccessRate.ToString("0.00") + "%");
                 RGui.Label("Streak: " + session.CurrentStreak + "    Best: " + session.BestStreak);
                 RGui.Label("Status: " + status);
                 RGui.Space(6f);
-                RGui.Label("Hotkeys: F6 start / F7 end / F8 start-stop / F9 reset");
+                RGui.Label("Hotkeys: F8 start/stop, F9 reset");
             }
             catch (Exception ex)
             {
@@ -113,25 +116,36 @@ namespace PracticeStats
 
         private static void OnSaveGUI(UnityModManager.ModEntry entry)
         {
-            ApplyTextFields();
+            ApplyAttempts();
         }
 
-        private static void SetStartFromCurrent()
+        private static void SyncRangeFromEditor(bool announce)
         {
-            int floor = GameBridge.CurrentFloor();
-            if (floor < 0) { status = "Start a level first"; return; }
-            session.StartFloor = floor;
-            startText = floor.ToString();
-            status = "Start tile = " + floor;
-        }
+            if (session.Running) return;
+            if (!EditorBridge.Exists() || EditorBridge.IsPlayMode()) return;
 
-        private static void SetEndFromCurrent()
-        {
-            int floor = GameBridge.CurrentFloor();
-            if (floor < 0) { status = "Start a level first"; return; }
-            session.EndFloor = floor;
-            endText = floor.ToString();
-            status = "End tile = " + floor;
+            int start;
+            int end;
+            int count;
+            if (!EditorBridge.TryGetSelectionRange(out start, out end, out count) || count < 2 || end <= start)
+            {
+                hasEditorRange = false;
+                selectedCount = count;
+                return;
+            }
+
+            bool changed = !hasEditorRange || session.StartFloor != start || session.EndFloor != end;
+            hasEditorRange = true;
+            selectedCount = count;
+
+            if (!changed) return;
+
+            session.StartFloor = start;
+            session.EndFloor = end;
+            if (session.TotalAttempts > 0) session.ResetStats();
+
+            if (announce || changed)
+                status = "Range set: " + start + " -> " + end;
         }
 
         private static void TogglePractice()
@@ -143,7 +157,15 @@ namespace PracticeStats
                 return;
             }
 
-            ApplyTextFields();
+            SyncRangeFromEditor(true);
+            ApplyAttempts();
+
+            if (!hasEditorRange)
+            {
+                status = "Select a range with Shift + Left Click first";
+                return;
+            }
+
             string reason;
             if (!session.CanStart(out reason))
             {
@@ -155,16 +177,11 @@ namespace PracticeStats
             status = "Practice started";
         }
 
-        private static void ApplyTextFields()
+        private static void ApplyAttempts()
         {
             int v;
-            if (int.TryParse(startText, out v)) session.StartFloor = Math.Max(0, v);
-            startText = session.StartFloor.ToString();
-
-            if (int.TryParse(endText, out v)) session.EndFloor = Math.Max(0, v);
-            endText = session.EndFloor.ToString();
-
-            if (int.TryParse(attemptsText, out v)) session.TargetAttempts = Math.Max(1, Math.Min(100000, v));
+            if (int.TryParse(attemptsText, out v))
+                session.TargetAttempts = Math.Max(1, Math.Min(100000, v));
             attemptsText = session.TargetAttempts.ToString();
         }
 
@@ -195,8 +212,8 @@ namespace PracticeStats
         public float SuccessRate { get { return TotalAttempts == 0 ? 0f : (Successes * 100f / TotalAttempts); } }
 
         private bool attemptActive;
-        private bool rewindPending;
-        private int rewindDelay;
+        private bool startPending;
+        private int startDelay;
         private int ignoreFrames;
         private int lastDeaths = -1;
         private bool failLatched;
@@ -205,7 +222,7 @@ namespace PracticeStats
         {
             if (EndFloor <= StartFloor) { reason = "End tile must be after start tile"; return false; }
             if (TargetAttempts < 1) { reason = "Target attempts must be at least 1"; return false; }
-            if (GameBridge.Controller() == null) { reason = "Start a level first"; return false; }
+            if (!EditorBridge.Exists()) { reason = "Open the level editor first"; return false; }
             reason = null;
             return true;
         }
@@ -218,14 +235,14 @@ namespace PracticeStats
             attemptActive = false;
             failLatched = false;
             lastDeaths = GameBridge.Deaths();
-            ScheduleRewind(1);
+            ScheduleStart(1);
         }
 
         public void Stop()
         {
             Running = false;
             attemptActive = false;
-            rewindPending = false;
+            startPending = false;
             failLatched = false;
         }
 
@@ -250,17 +267,19 @@ namespace PracticeStats
                 return;
             }
 
-            if (rewindPending)
+            if (startPending)
             {
-                if (rewindDelay-- > 0) return;
-                rewindPending = false;
-                if (!GameBridge.Rewind(StartFloor))
+                if (startDelay-- > 0) return;
+                startPending = false;
+
+                if (!GameBridge.StartAt(StartFloor))
                 {
-                    Main.SetStatus("Could not rewind to start tile");
+                    Main.SetStatus("Could not start from selected tile");
                     Running = false;
                     return;
                 }
-                ignoreFrames = 10;
+
+                ignoreFrames = 12;
                 attemptActive = false;
                 failLatched = false;
                 lastDeaths = GameBridge.Deaths();
@@ -288,8 +307,7 @@ namespace PracticeStats
                 return;
             }
 
-            if (failedNow) failLatched = true;
-            else failLatched = false;
+            failLatched = failedNow;
 
             if (!attemptActive)
             {
@@ -329,13 +347,160 @@ namespace PracticeStats
                 Completed = true;
                 return;
             }
-            ScheduleRewind(8);
+            ScheduleStart(8);
         }
 
-        private void ScheduleRewind(int delay)
+        private void ScheduleStart(int delay)
         {
-            rewindPending = true;
-            rewindDelay = delay;
+            startPending = true;
+            startDelay = delay;
+        }
+    }
+
+    internal static class EditorBridge
+    {
+        private static Type editorType;
+        private static MemberInfo instanceMember;
+        private static MemberInfo selectedFloorsMember;
+        private static MemberInfo playModeMember;
+        private static MethodInfo playMethod;
+        private static bool resolved;
+
+        public static bool Exists()
+        {
+            return Instance() != null;
+        }
+
+        public static bool IsPlayMode()
+        {
+            object editor = Instance();
+            if (editor == null) return false;
+            try
+            {
+                object raw = ReadMember(editor, playModeMember);
+                return raw is bool && (bool)raw;
+            }
+            catch { return false; }
+        }
+
+        public static bool TryGetSelectionRange(out int first, out int last, out int count)
+        {
+            first = 0;
+            last = 0;
+            count = 0;
+
+            object editor = Instance();
+            if (editor == null || selectedFloorsMember == null) return false;
+
+            try
+            {
+                object raw = ReadMember(editor, selectedFloorsMember);
+                IEnumerable floors = raw as IEnumerable;
+                if (floors == null) return false;
+
+                int min = int.MaxValue;
+                int max = int.MinValue;
+
+                foreach (object floor in floors)
+                {
+                    if (floor == null) continue;
+                    int seq;
+                    if (!TryGetSeqId(floor, out seq)) continue;
+                    if (seq < min) min = seq;
+                    if (seq > max) max = seq;
+                    count++;
+                }
+
+                if (count == 0 || min == int.MaxValue || max == int.MinValue) return false;
+                first = min;
+                last = max;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Main.Log("Selection read error: " + ex.Message);
+                return false;
+            }
+        }
+
+        public static bool PlayAt(int floor)
+        {
+            object editor = Instance();
+            if (editor == null || playMethod == null) return false;
+            try
+            {
+                playMethod.Invoke(editor, new object[] { floor, false });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Main.Log("Editor Play error: " + ex.Message);
+                return false;
+            }
+        }
+
+        private static object Instance()
+        {
+            Resolve();
+            if (editorType == null || instanceMember == null) return null;
+            try { return ReadMember(null, instanceMember); }
+            catch { return null; }
+        }
+
+        private static void Resolve()
+        {
+            if (resolved) return;
+            resolved = true;
+            editorType = FindType("scnEditor");
+            if (editorType == null) return;
+
+            const BindingFlags all = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance;
+            instanceMember = (MemberInfo)editorType.GetField("instance", all) ?? editorType.GetProperty("instance", all);
+            selectedFloorsMember = (MemberInfo)editorType.GetField("selectedFloors", all) ?? editorType.GetProperty("selectedFloors", all);
+            playModeMember = (MemberInfo)editorType.GetProperty("playMode", all) ?? editorType.GetField("playMode", all);
+            playMethod = editorType.GetMethods(all).FirstOrDefault(m =>
+            {
+                if (m.Name != "Play") return false;
+                ParameterInfo[] p = m.GetParameters();
+                return p.Length == 2 && p[0].ParameterType == typeof(int) && p[1].ParameterType == typeof(bool);
+            });
+        }
+
+        private static bool TryGetSeqId(object floor, out int seq)
+        {
+            seq = -1;
+            Type t = floor.GetType();
+            const BindingFlags all = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance;
+            MemberInfo m = (MemberInfo)t.GetField("seqID", all) ?? t.GetProperty("seqID", all);
+            if (m == null) return false;
+            object raw = ReadMember(floor, m);
+            if (raw == null) return false;
+            seq = Convert.ToInt32(raw);
+            return true;
+        }
+
+        private static Type FindType(string name)
+        {
+            foreach (Assembly a in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try
+                {
+                    Type t = a.GetType(name, false);
+                    if (t != null) return t;
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        private static object ReadMember(object instance, MemberInfo member)
+        {
+            if (member == null) return null;
+            FieldInfo f = member as FieldInfo;
+            if (f != null) return f.GetValue(instance);
+            PropertyInfo p = member as PropertyInfo;
+            if (p != null) return p.GetValue(instance, null);
+            return null;
         }
     }
 
@@ -350,6 +515,25 @@ namespace PracticeStats
         private static MemberInfo failedMember;
         private static MemberInfo stateMember;
 
+        public static bool StartAt(int floor)
+        {
+            // Important for deep editor tiles: start through scnEditor.Play first when we are
+            // coming from edit mode. This makes the editor initialize the selected section
+            // correctly before the controller is asked to rewind on later attempts.
+            if (EditorBridge.Exists() && (!EditorBridge.IsPlayMode() || Controller() == null))
+            {
+                if (EditorBridge.PlayAt(floor)) return true;
+            }
+
+            if (Rewind(floor)) return true;
+
+            // Fallback if the controller disappeared after a fail and the editor has already
+            // switched back to edit mode.
+            if (EditorBridge.Exists() && EditorBridge.PlayAt(floor)) return true;
+
+            return false;
+        }
+
         public static object Controller()
         {
             Resolve();
@@ -360,7 +544,7 @@ namespace PracticeStats
         public static int CurrentFloor()
         {
             object c = Controller();
-            if (c == null) return -1;
+            if (c == null || seqMember == null) return -1;
             try
             {
                 object value = ReadMember(c, seqMember);
@@ -403,7 +587,7 @@ namespace PracticeStats
             return false;
         }
 
-        public static bool Rewind(int floor)
+        private static bool Rewind(int floor)
         {
             object c = Controller();
             if (c == null) return false;
