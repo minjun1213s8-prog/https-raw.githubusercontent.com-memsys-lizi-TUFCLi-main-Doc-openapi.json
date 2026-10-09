@@ -25,7 +25,7 @@ namespace PracticeStats
             modEntry.OnGUI = OnGUI;
             modEntry.OnSaveGUI = OnSaveGUI;
             modEntry.OnUnload = OnUnload;
-            Log("PracticeStats v0.4.9 loaded (ADOFAI 3.4.0 target).");
+            Log("PracticeStats 0.1.0v loaded (ADOFAI 3.4.0 target).");
             return true;
         }
 
@@ -81,7 +81,7 @@ namespace PracticeStats
             {
                 SyncRangeFromEditor(false);
 
-                RGui.Label("PracticeStats v0.4.9 - ADOFAI 3.4.0");
+                RGui.Label("PracticeStats 0.1.0v - ADOFAI 3.4.0");
                 RGui.Label("Uses ADOFAI built-in practice mode");
                 RGui.Label("Range: editor Shift + Left Click selection");
                 RGui.Space(6f);
@@ -1969,9 +1969,9 @@ namespace PracticeStats
                 SetProperty(textRect, "anchoredPosition", textPosition);
                 SetProperty(textRect, "sizeDelta", textSize);
 
-                // Fully opaque black, as requested.
+                // Semi-transparent charcoal gray: readable over bright effects without looking like a solid black block.
                 object black = colorCtor.Invoke(
-                    new object[] { 0f, 0f, 0f, 1f });
+                    new object[] { 0.10f, 0.10f, 0.10f, 0.78f });
 
                 SetProperty(panelImage, "color", black);
                 SetProperty(panelImage, "raycastTarget", false);
