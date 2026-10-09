@@ -1,0 +1,9 @@
+{
+  "Id": "PracticeStats",
+  "DisplayName": "PracticeStats",
+  "Author": "Wonerd",
+  "Version": "0.1.3",
+  "ManagerVersion": "0.32.4",
+  "AssemblyName": "PracticeStats.dll",
+  "EntryMethod": "PracticeStats.Main.Load"
+}
