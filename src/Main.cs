@@ -25,7 +25,7 @@ namespace PracticeStats
             modEntry.OnGUI = OnGUI;
             modEntry.OnSaveGUI = OnSaveGUI;
             modEntry.OnUnload = OnUnload;
-            Log("PracticeStats v0.4.6 loaded (ADOFAI 3.4.0 target).");
+            Log("PracticeStats v0.4.7 loaded (ADOFAI 3.4.0 target).");
             return true;
         }
 
@@ -81,7 +81,7 @@ namespace PracticeStats
             {
                 SyncRangeFromEditor(false);
 
-                RGui.Label("PracticeStats v0.4.6 - ADOFAI 3.4.0");
+                RGui.Label("PracticeStats v0.4.7 - ADOFAI 3.4.0");
                 RGui.Label("Uses ADOFAI built-in practice mode");
                 RGui.Label("Range: editor Shift + Left Click selection");
                 RGui.Space(6f);
@@ -1572,11 +1572,6 @@ namespace PracticeStats
     {
         private static bool frozen;
 
-        private static Type timeType;
-        private static PropertyInfo timeScaleProperty;
-        private static Type audioListenerType;
-        private static PropertyInfo audioPauseProperty;
-
         private static Type cameraType;
         private static MemberInfo cameraInstanceMember;
         private static MemberInfo cameraEnabledMember;
@@ -1585,8 +1580,6 @@ namespace PracticeStats
         private static MemberInfo vfxInstanceMember;
         private static MemberInfo vfxEnabledMember;
 
-        private static float previousTimeScale = 1f;
-        private static bool previousAudioPause;
         private static bool previousCameraEnabled = true;
         private static bool previousVfxEnabled = true;
         private static bool resolved;
@@ -1596,31 +1589,18 @@ namespace PracticeStats
             if (frozen) return;
             Resolve();
 
-            try
-            {
-                if (timeScaleProperty != null)
-                {
-                    object raw = timeScaleProperty.GetValue(null, null);
-                    if (raw != null)
-                        previousTimeScale = Convert.ToSingle(raw);
-                    timeScaleProperty.SetValue(null, 0f, null);
-                }
-            }
-            catch { }
+            // Only freeze post-range camera/VFX processing.
+            // Do NOT touch Time.timeScale, audio, or player/planet simulation:
+            // the planets and normal audio should keep running on the success screen.
+            previousCameraEnabled = ReadEnabled(
+                cameraInstanceMember,
+                cameraEnabledMember,
+                true);
 
-            try
-            {
-                if (audioPauseProperty != null)
-                {
-                    object raw = audioPauseProperty.GetValue(null, null);
-                    if (raw is bool) previousAudioPause = (bool)raw;
-                    audioPauseProperty.SetValue(null, true, null);
-                }
-            }
-            catch { }
-
-            previousCameraEnabled = ReadEnabled(cameraInstanceMember, cameraEnabledMember, true);
-            previousVfxEnabled = ReadEnabled(vfxInstanceMember, vfxEnabledMember, true);
+            previousVfxEnabled = ReadEnabled(
+                vfxInstanceMember,
+                vfxEnabledMember,
+                true);
 
             WriteEnabled(cameraInstanceMember, cameraEnabledMember, false);
             WriteEnabled(vfxInstanceMember, vfxEnabledMember, false);
@@ -1633,27 +1613,16 @@ namespace PracticeStats
             if (!frozen) return;
             Resolve();
 
-            // Restore runtime systems BEFORE ResetCustomLevel/Play reconstructs
-            // the next attempt, so the new camera/VFX state can initialize normally.
-            WriteEnabled(cameraInstanceMember, cameraEnabledMember, previousCameraEnabled);
-            WriteEnabled(vfxInstanceMember, vfxEnabledMember, previousVfxEnabled);
+            // Restore camera/VFX immediately before the next attempt is rebuilt.
+            WriteEnabled(
+                cameraInstanceMember,
+                cameraEnabledMember,
+                previousCameraEnabled);
 
-            try
-            {
-                if (timeScaleProperty != null)
-                    timeScaleProperty.SetValue(
-                        null,
-                        previousTimeScale > 0f ? previousTimeScale : 1f,
-                        null);
-            }
-            catch { }
-
-            try
-            {
-                if (audioPauseProperty != null)
-                    audioPauseProperty.SetValue(null, previousAudioPause, null);
-            }
-            catch { }
+            WriteEnabled(
+                vfxInstanceMember,
+                vfxEnabledMember,
+                previousVfxEnabled);
 
             GameBridge.SetPlayersResponsive(true);
             GameBridge.UnlockPlayerInput();
@@ -1670,30 +1639,24 @@ namespace PracticeStats
                 BindingFlags.Public | BindingFlags.NonPublic |
                 BindingFlags.Static | BindingFlags.Instance;
 
-            timeType = Type.GetType("UnityEngine.Time, UnityEngine.CoreModule", false);
-            if (timeType != null)
-                timeScaleProperty = timeType.GetProperty(
-                    "timeScale",
-                    BindingFlags.Public | BindingFlags.Static);
-
-            audioListenerType = Type.GetType("UnityEngine.AudioListener, UnityEngine.AudioModule", false);
-            if (audioListenerType != null)
-                audioPauseProperty = audioListenerType.GetProperty(
-                    "pause",
-                    BindingFlags.Public | BindingFlags.Static);
-
             cameraType = ReflectionUtil.FindType("scrCamera");
             if (cameraType != null)
             {
-                cameraInstanceMember = ReflectionUtil.FindMember(cameraType, "instance", all);
-                cameraEnabledMember = ReflectionUtil.FindMember(cameraType, "enabled", all);
+                cameraInstanceMember =
+                    ReflectionUtil.FindMember(cameraType, "instance", all);
+
+                cameraEnabledMember =
+                    ReflectionUtil.FindMember(cameraType, "enabled", all);
             }
 
             vfxType = ReflectionUtil.FindType("scrVfxPlus");
             if (vfxType != null)
             {
-                vfxInstanceMember = ReflectionUtil.FindMember(vfxType, "instance", all);
-                vfxEnabledMember = ReflectionUtil.FindMember(vfxType, "enabled", all);
+                vfxInstanceMember =
+                    ReflectionUtil.FindMember(vfxType, "instance", all);
+
+                vfxEnabledMember =
+                    ReflectionUtil.FindMember(vfxType, "enabled", all);
             }
         }
 
@@ -1707,10 +1670,15 @@ namespace PracticeStats
                 if (instanceMember == null || enabledMember == null)
                     return fallback;
 
-                object instance = ReflectionUtil.ReadMember(null, instanceMember);
-                if (instance == null) return fallback;
+                object instance =
+                    ReflectionUtil.ReadMember(null, instanceMember);
 
-                object raw = ReflectionUtil.ReadMember(instance, enabledMember);
+                if (instance == null)
+                    return fallback;
+
+                object raw =
+                    ReflectionUtil.ReadMember(instance, enabledMember);
+
                 return raw is bool ? (bool)raw : fallback;
             }
             catch
@@ -1729,8 +1697,11 @@ namespace PracticeStats
                 if (instanceMember == null || enabledMember == null)
                     return;
 
-                object instance = ReflectionUtil.ReadMember(null, instanceMember);
-                if (instance == null) return;
+                object instance =
+                    ReflectionUtil.ReadMember(null, instanceMember);
+
+                if (instance == null)
+                    return;
 
                 ReflectionUtil.WriteMember(instance, enabledMember, value);
             }
