@@ -25,7 +25,7 @@ namespace PracticeStats
             modEntry.OnGUI = OnGUI;
             modEntry.OnSaveGUI = OnSaveGUI;
             modEntry.OnUnload = OnUnload;
-            Log("PracticeStats v0.4.4 loaded (ADOFAI 3.4.0 target).");
+            Log("PracticeStats v0.4.5 loaded (ADOFAI 3.4.0 target).");
             return true;
         }
 
@@ -81,7 +81,7 @@ namespace PracticeStats
             {
                 SyncRangeFromEditor(false);
 
-                RGui.Label("PracticeStats v0.4.4 - ADOFAI 3.4.0");
+                RGui.Label("PracticeStats v0.4.5 - ADOFAI 3.4.0");
                 RGui.Label("Uses ADOFAI built-in practice mode");
                 RGui.Label("Range: editor Shift + Left Click selection");
                 RGui.Space(6f);
@@ -356,6 +356,8 @@ namespace PracticeStats
             continueRequested = false;
             endpointRearmFrames = 0;
             BuiltInPractice.Disable();
+            GameBridge.SetPlayersResponsive(true);
+            GameBridge.UnlockPlayerInput();
         }
 
         public void ResetStats()
@@ -442,7 +444,7 @@ namespace PracticeStats
             {
                 if (Completed || TotalAttempts >= TargetAttempts)
                 {
-                    if (UnityBridge.AnyKeyDown())
+                    if (GameBridge.AnyValidInputWasTriggered())
                     {
                         Running = false;
                         FailScreenActive = false;
@@ -508,7 +510,7 @@ namespace PracticeStats
             {
                 if (!continueRequested)
                 {
-                    if (!UnityBridge.AnyKeyDown()) return;
+                    if (!GameBridge.AnyValidInputWasTriggered()) return;
                     continueRequested = true;
                     continueDelay = 2;
                     return;
@@ -533,7 +535,7 @@ namespace PracticeStats
 
             if (!continueRequested)
             {
-                if (!UnityBridge.AnyKeyDown()) return;
+                if (!GameBridge.AnyValidInputWasTriggered()) return;
 
                 continueRequested = true;
                 continueDelay = 2;
@@ -652,6 +654,8 @@ namespace PracticeStats
             endpointRearmFrames = 0;
 
             BuiltInPractice.Disable();
+            GameBridge.SetPlayersResponsive(true);
+            GameBridge.UnlockPlayerInput();
 
             // Restore the user's practice range after scnEditor.SwitchToEditMode()
             // has selected only one floor. This also lets F8 be used again
@@ -1193,6 +1197,13 @@ namespace PracticeStats
         private static MethodInfo onLandOnPortalMethod;
         private static Type portalType;
         private static object endOfLevelPortal;
+
+        private static Type adoBaseType;
+        private static MemberInfo playerManagerMember;
+        private static MethodInfo anyValidInputMethod;
+        private static MethodInfo setResponsiveMethod;
+        private static MethodInfo unlockInputMethod;
+
         private static bool resolved;
 
         public static object Controller()
@@ -1262,6 +1273,66 @@ namespace PracticeStats
             catch { }
         }
 
+        public static bool AnyValidInputWasTriggered()
+        {
+            Resolve();
+
+            try
+            {
+                object pm = PlayerManager();
+                if (pm == null || anyValidInputMethod == null)
+                    return UnityBridge.AnyKeyDown();
+
+                object result = anyValidInputMethod.Invoke(pm, null);
+                return result is bool && (bool)result;
+            }
+            catch
+            {
+                return UnityBridge.AnyKeyDown();
+            }
+        }
+
+        public static void SetPlayersResponsive(bool responsive)
+        {
+            Resolve();
+
+            try
+            {
+                object pm = PlayerManager();
+                if (pm != null && setResponsiveMethod != null)
+                    setResponsiveMethod.Invoke(pm, new object[] { responsive });
+            }
+            catch (Exception ex)
+            {
+                Main.Log("SetAllPlayerResponsive error: " + ex.Message);
+            }
+        }
+
+        public static void UnlockPlayerInput()
+        {
+            Resolve();
+
+            try
+            {
+                object pm = PlayerManager();
+                if (pm != null && unlockInputMethod != null)
+                    unlockInputMethod.Invoke(pm, null);
+            }
+            catch (Exception ex)
+            {
+                Main.Log("UnlockAllPlayerInput error: " + ex.Message);
+            }
+        }
+
+        private static object PlayerManager()
+        {
+            if (adoBaseType == null || playerManagerMember == null)
+                return null;
+
+            try { return ReflectionUtil.ReadMember(null, playerManagerMember); }
+            catch { return null; }
+        }
+
         public static bool TriggerNativePracticeFinish()
         {
             object controller = Controller();
@@ -1326,6 +1397,13 @@ namespace PracticeStats
                     controller,
                     new object[] { enumerator });
 
+                // OnLandOnPortal disables player responsiveness on a clear.
+                // scrController.ResetCustomLevel only turns it back on inside
+                // the scnGame branch. Level-editor practice skips that branch,
+                // so without this the next attempt starts but cannot receive input.
+                SetPlayersResponsive(true);
+                UnlockPlayerInput();
+
                 return true;
             }
             catch (Exception ex)
@@ -1360,6 +1438,32 @@ namespace PracticeStats
             {
                 try { endOfLevelPortal = Enum.Parse(portalType, "EndOfLevel", true); }
                 catch { endOfLevelPortal = null; }
+            }
+
+            adoBaseType = ReflectionUtil.FindType("ADOBase");
+            if (adoBaseType != null)
+            {
+                playerManagerMember = ReflectionUtil.FindMember(adoBaseType, "playerManager", all);
+
+                Type playerManagerType = ReflectionUtil.FindType("scrPlayerManager");
+                if (playerManagerType != null)
+                {
+                    anyValidInputMethod = playerManagerType.GetMethods(all)
+                        .FirstOrDefault(m => m.Name == "AnyValidInputWasTriggered" &&
+                                             m.GetParameters().Length == 0);
+
+                    setResponsiveMethod = playerManagerType.GetMethods(all)
+                        .FirstOrDefault(m =>
+                        {
+                            if (m.Name != "SetAllPlayerResponsive") return false;
+                            ParameterInfo[] p = m.GetParameters();
+                            return p.Length == 1 && p[0].ParameterType == typeof(bool);
+                        });
+
+                    unlockInputMethod = playerManagerType.GetMethods(all)
+                        .FirstOrDefault(m => m.Name == "UnlockAllPlayerInput" &&
+                                             m.GetParameters().Length == 0);
+                }
             }
 
             onLandOnPortalMethod = controllerType.GetMethods(all)
