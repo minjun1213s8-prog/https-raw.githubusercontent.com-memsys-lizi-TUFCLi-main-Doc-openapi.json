@@ -25,7 +25,7 @@ namespace PracticeStats
             modEntry.OnGUI = OnGUI;
             modEntry.OnSaveGUI = OnSaveGUI;
             modEntry.OnUnload = OnUnload;
-            Log("PracticeStats v0.4.1 loaded (ADOFAI 3.4.0 target).");
+            Log("PracticeStats v0.4.2 loaded (ADOFAI 3.4.0 target).");
             return true;
         }
 
@@ -81,7 +81,7 @@ namespace PracticeStats
             {
                 SyncRangeFromEditor(false);
 
-                RGui.Label("PracticeStats v0.4.1 - ADOFAI 3.4.0");
+                RGui.Label("PracticeStats v0.4.2 - ADOFAI 3.4.0");
                 RGui.Label("Uses ADOFAI built-in practice mode");
                 RGui.Label("Range: editor Shift + Left Click selection");
                 RGui.Space(6f);
@@ -271,15 +271,16 @@ namespace PracticeStats
         private int lastDeaths = -1;
         private bool failCounted;
 
-        // The editor clears GCS.practiceMode while setting up its first playback.
-        // Therefore a new PracticeStats session is bootstrapped in two phases:
-        // 1) let scnEditor.Play() create the normal editor-play runtime;
-        // 2) enable ADOFAI practice mode and use scrController.ResetCustomLevel()
-        //    to restart the actual first counted attempt.
         private bool initializing;
         private int initializeStage;
         private int initializeDelay;
         private int initializeTimeout;
+
+        // In the editor, ADOFAI's Won_Update does not consume the result-screen
+        // continue key. We detect it, but restart on a later frame so the key
+        // that dismissed the result screen never leaks into the next attempt.
+        private bool continueRequested;
+        private int continueDelay;
 
         public bool CanStart(out string reason)
         {
@@ -318,9 +319,6 @@ namespace PracticeStats
 
             BuiltInPractice.Disable();
 
-            // ADOFAI's own editor Play() starts at tile 0 when multiple floors are
-            // selected. The Shift-range has already been cached by PracticeStats,
-            // so temporarily collapse selection to the first tile and use Play().
             if (!EditorBridge.PlayFromSingleFloor(StartFloor))
                 return false;
 
@@ -329,6 +327,8 @@ namespace PracticeStats
             WaitingForSuccessContinue = false;
             FailScreenActive = false;
             failCounted = false;
+            continueRequested = false;
+            continueDelay = 0;
 
             initializing = true;
             initializeStage = 0;
@@ -348,6 +348,7 @@ namespace PracticeStats
             FailScreenActive = false;
             failCounted = false;
             initializing = false;
+            continueRequested = false;
             BuiltInPractice.Disable();
         }
 
@@ -371,41 +372,23 @@ namespace PracticeStats
                 return;
             }
 
+            // ESC / the editor stop button runs scnEditor.SwitchToEditMode(),
+            // which clears GCS.practiceMode. Treat that as an explicit stop of
+            // PracticeStats as well, otherwise stale session state deadlocks
+            // the next F8 start.
+            if (EditorBridge.Exists() && !EditorBridge.IsPlayMode())
+            {
+                ReturnToEditor();
+                return;
+            }
+
             string state = GameBridge.StateName();
             int current = GameBridge.CurrentFloor();
             int deaths = GameBridge.Deaths();
 
-            // On a normal (non-final) clear, DO NOT read or consume the user's
-            // continue key. ADOFAI's own Won/practice flow gets that input and
-            // performs its own ResetCustomLevel. We only observe the restart.
             if (WaitingForSuccessContinue)
             {
-                if (Completed || TotalAttempts >= TargetAttempts)
-                {
-                    if (UnityBridge.AnyKeyDown())
-                    {
-                        Running = false;
-                        WaitingForSuccessContinue = false;
-                        BuiltInPractice.Disable();
-                        Main.SetStatus("Completed");
-                    }
-                    return;
-                }
-
-                bool stillWon = ContainsState(state, "Won");
-                if (stillWon)
-                    return;
-
-                if (current >= StartFloor && current < EndFloor)
-                {
-                    WaitingForSuccessContinue = false;
-                    FailScreenActive = false;
-                    failCounted = false;
-                    graceFrames = 12;
-                    lastDeaths = deaths;
-                    Main.SetStatus("Next attempt");
-                }
-
+                TickSuccessContinue(state, current, deaths);
                 return;
             }
 
@@ -459,9 +442,6 @@ namespace PracticeStats
                     return;
                 }
 
-                // ADOFAI's Fail2 flow owns the continue input and restarts the
-                // custom level. Once it returns to the selected range, arm the
-                // next attempt without consuming that input ourselves.
                 if (current >= StartFloor && current < EndFloor)
                 {
                     failCounted = false;
@@ -474,22 +454,89 @@ namespace PracticeStats
                 return;
             }
 
-            // Success is counted only when ADOFAI itself reaches Won.
-            // Do not use currentFloor >= EndFloor as a fallback: if the native
-            // practice endpoint was not installed, letting the chart continue
-            // is a setup failure rather than a successful attempt.
             bool isWon = ContainsState(state, "Won");
             if (isWon)
             {
                 RecordSuccess();
                 Completed = TotalAttempts >= TargetAttempts;
                 WaitingForSuccessContinue = true;
+                continueRequested = false;
+                continueDelay = 0;
 
                 Main.SetStatus(
                     Completed
                         ? "Completed"
                         : "Success - press any key");
             }
+        }
+
+        private void TickSuccessContinue(string state, int current, int deaths)
+        {
+            if (Completed || TotalAttempts >= TargetAttempts)
+            {
+                if (!continueRequested)
+                {
+                    if (!UnityBridge.AnyKeyDown()) return;
+                    continueRequested = true;
+                    continueDelay = 2;
+                    return;
+                }
+
+                if (continueDelay-- > 0) return;
+
+                // ESC may have switched to edit mode after we saw the key.
+                if (EditorBridge.Exists() && !EditorBridge.IsPlayMode())
+                {
+                    ReturnToEditor();
+                    return;
+                }
+
+                Running = false;
+                WaitingForSuccessContinue = false;
+                continueRequested = false;
+                BuiltInPractice.Disable();
+                Main.SetStatus("Completed");
+                return;
+            }
+
+            if (!continueRequested)
+            {
+                if (!UnityBridge.AnyKeyDown()) return;
+
+                continueRequested = true;
+                continueDelay = 2;
+                return;
+            }
+
+            if (continueDelay-- > 0) return;
+
+            // If the pressed key was ESC, scnEditor may switch back to edit mode
+            // one frame later. Never restart in that case.
+            if (EditorBridge.Exists() && !EditorBridge.IsPlayMode())
+            {
+                ReturnToEditor();
+                return;
+            }
+
+            BuiltInPractice.Configure(StartFloor, EndFloor);
+
+            if (!GameBridge.RestartCustomLevelBuiltIn(true))
+            {
+                Running = false;
+                WaitingForSuccessContinue = false;
+                continueRequested = false;
+                BuiltInPractice.Disable();
+                Main.SetStatus("Could not restart practice attempt");
+                return;
+            }
+
+            WaitingForSuccessContinue = false;
+            FailScreenActive = false;
+            failCounted = false;
+            continueRequested = false;
+            graceFrames = 20;
+            lastDeaths = deaths;
+            Main.SetStatus("Next attempt");
         }
 
         private void TickInitialization()
@@ -509,14 +556,18 @@ namespace PracticeStats
                 return;
             }
 
+            // If the user immediately cancelled playback with ESC, do not try
+            // to apply practice state to an editor that has already stopped.
+            if (EditorBridge.Exists() && !EditorBridge.IsPlayMode())
+            {
+                ReturnToEditor();
+                return;
+            }
+
             if (initializeStage == 0)
             {
-                // scnEditor.Play() has now finished its own initialization and
-                // any practiceMode reset it performs has already happened.
                 BuiltInPractice.Configure(StartFloor, EndFloor);
 
-                // Use ADOFAI's native restart coroutine, not a manual reset.
-                // This installs the practice endpoint/portal on the FIRST attempt.
                 if (!GameBridge.RestartCustomLevelBuiltIn(true))
                 {
                     Running = false;
@@ -544,10 +595,30 @@ namespace PracticeStats
                 failCounted = false;
                 WaitingForSuccessContinue = false;
                 FailScreenActive = false;
+                continueRequested = false;
                 graceFrames = 12;
                 lastDeaths = GameBridge.Deaths();
                 Main.SetStatus("Practice started");
             }
+        }
+
+        private void ReturnToEditor()
+        {
+            Running = false;
+            initializing = false;
+            WaitingForSuccessContinue = false;
+            FailScreenActive = false;
+            failCounted = false;
+            continueRequested = false;
+
+            BuiltInPractice.Disable();
+
+            // Restore the user's practice range after scnEditor.SwitchToEditMode()
+            // has selected only one floor. This also lets F8 be used again
+            // without having to rebuild the range manually.
+            EditorBridge.RestoreRangeSelection(StartFloor, EndFloor);
+
+            Main.SetStatus("Returned to editor");
         }
 
         private void RecordSuccess()
@@ -664,6 +735,7 @@ namespace PracticeStats
         private static MemberInfo playModeMember;
         private static MethodInfo playNoArgs;
         private static MethodInfo playWithArgs;
+        private static MethodInfo multiSelectFloorsMethod;
         private static bool resolved;
 
         public static bool Exists()
@@ -765,6 +837,37 @@ namespace PracticeStats
             return false;
         }
 
+        public static bool RestoreRangeSelection(int startFloor, int endFloor)
+        {
+            object editor = Instance();
+            if (editor == null || multiSelectFloorsMethod == null || floorsMember == null)
+                return false;
+
+            try
+            {
+                IList floors = ReflectionUtil.ReadMember(editor, floorsMember) as IList;
+                if (floors == null || floors.Count == 0)
+                    return false;
+
+                int start = Math.Max(0, Math.Min(startFloor, floors.Count - 1));
+                int end = Math.Max(0, Math.Min(endFloor, floors.Count - 1));
+
+                if (end <= start)
+                    return false;
+
+                multiSelectFloorsMethod.Invoke(
+                    editor,
+                    new object[] { floors[start], floors[end], false });
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Main.Log("Restore range selection error: " + ex.Message);
+                return false;
+            }
+        }
+
         private static object Instance()
         {
             Resolve();
@@ -800,6 +903,14 @@ namespace PracticeStats
                 return p.Length == 2 &&
                        p[0].ParameterType == typeof(int) &&
                        p[1].ParameterType == typeof(bool);
+            });
+
+            multiSelectFloorsMethod = methods.FirstOrDefault(m =>
+            {
+                if (m.Name != "MultiSelectFloors") return false;
+                ParameterInfo[] p = m.GetParameters();
+                return p.Length == 3 &&
+                       p[2].ParameterType == typeof(bool);
             });
         }
 
