@@ -25,7 +25,7 @@ namespace PracticeStats
             modEntry.OnGUI = OnGUI;
             modEntry.OnSaveGUI = OnSaveGUI;
             modEntry.OnUnload = OnUnload;
-            Log("PracticeStats v0.4.5 loaded (ADOFAI 3.4.0 target).");
+            Log("PracticeStats v0.4.6 loaded (ADOFAI 3.4.0 target).");
             return true;
         }
 
@@ -81,7 +81,7 @@ namespace PracticeStats
             {
                 SyncRangeFromEditor(false);
 
-                RGui.Label("PracticeStats v0.4.5 - ADOFAI 3.4.0");
+                RGui.Label("PracticeStats v0.4.6 - ADOFAI 3.4.0");
                 RGui.Label("Uses ADOFAI built-in practice mode");
                 RGui.Label("Range: editor Shift + Left Click selection");
                 RGui.Space(6f);
@@ -209,17 +209,17 @@ namespace PracticeStats
             int remaining = Math.Max(0, session.TargetAttempts - session.TotalAttempts);
             string prompt = "";
 
-            if (session.WaitingForSuccessContinue)
+            if (session.Completed)
             {
-                prompt = session.Completed
-                    ? "\n\nCOMPLETE"
-                    : "\n\nSUCCESS - press any key";
+                prompt = "\n\nCOMPLETE - press any key to return to editor";
+            }
+            else if (session.WaitingForSuccessContinue)
+            {
+                prompt = "\n\nSUCCESS - press any key";
             }
             else if (session.FailScreenActive)
             {
-                prompt = session.Completed
-                    ? "\n\nCOMPLETE"
-                    : "\n\nFAIL - press any key";
+                prompt = "\n\nFAIL - press any key";
             }
 
             string text =
@@ -321,6 +321,7 @@ namespace PracticeStats
             if (TotalAttempts >= TargetAttempts)
                 ResetStats();
 
+            SuccessFreeze.Unfreeze();
             BuiltInPractice.Disable();
 
             if (!EditorBridge.PlayFromSingleFloor(StartFloor))
@@ -355,6 +356,7 @@ namespace PracticeStats
             initializing = false;
             continueRequested = false;
             endpointRearmFrames = 0;
+            SuccessFreeze.Unfreeze();
             BuiltInPractice.Disable();
             GameBridge.SetPlayersResponsive(true);
             GameBridge.UnlockPlayerInput();
@@ -387,6 +389,15 @@ namespace PracticeStats
             if (initializing)
             {
                 TickInitialization();
+                return;
+            }
+
+            // COMPLETE is a separate state. It never starts another attempt.
+            // It only waits for a valid ADOFAI input, then exits practice and
+            // returns to the editor with the range restored.
+            if (Completed)
+            {
+                TickComplete();
                 return;
             }
 
@@ -431,7 +442,7 @@ namespace PracticeStats
                 if (TotalAttempts >= TargetAttempts)
                 {
                     Completed = true;
-                    Main.SetStatus("Completed");
+                    Main.SetStatus("Completed - press any key to return to editor");
                 }
                 else
                 {
@@ -442,18 +453,6 @@ namespace PracticeStats
 
             if (failCounted)
             {
-                if (Completed || TotalAttempts >= TargetAttempts)
-                {
-                    if (GameBridge.AnyValidInputWasTriggered())
-                    {
-                        Running = false;
-                        FailScreenActive = false;
-                        BuiltInPractice.Disable();
-                        Main.SetStatus("Completed");
-                    }
-                    return;
-                }
-
                 if (isFail)
                 {
                     FailScreenActive = true;
@@ -497,42 +496,19 @@ namespace PracticeStats
                 continueRequested = false;
                 continueDelay = 0;
 
+                // Freeze the exact successful frame. Camera/VFX/audio remain
+                // stopped until the next attempt is actually being started.
+                SuccessFreeze.Freeze();
+
                 Main.SetStatus(
                     Completed
-                        ? "Completed"
+                        ? "Completed - press any key to return to editor"
                         : "Success - press any key");
             }
         }
 
         private void TickSuccessContinue(string state, int current, int deaths)
         {
-            if (Completed || TotalAttempts >= TargetAttempts)
-            {
-                if (!continueRequested)
-                {
-                    if (!GameBridge.AnyValidInputWasTriggered()) return;
-                    continueRequested = true;
-                    continueDelay = 2;
-                    return;
-                }
-
-                if (continueDelay-- > 0) return;
-
-                // ESC may have switched to edit mode after we saw the key.
-                if (EditorBridge.Exists() && !EditorBridge.IsPlayMode())
-                {
-                    ReturnToEditor();
-                    return;
-                }
-
-                Running = false;
-                WaitingForSuccessContinue = false;
-                continueRequested = false;
-                BuiltInPractice.Disable();
-                Main.SetStatus("Completed");
-                return;
-            }
-
             if (!continueRequested)
             {
                 if (!GameBridge.AnyValidInputWasTriggered()) return;
@@ -544,13 +520,17 @@ namespace PracticeStats
 
             if (continueDelay-- > 0) return;
 
-            // If the pressed key was ESC, scnEditor may switch back to edit mode
-            // one frame later. Never restart in that case.
+            // If the pressed key was ESC, the editor may have switched modes
+            // one frame later. Do not resurrect a new attempt in edit mode.
             if (EditorBridge.Exists() && !EditorBridge.IsPlayMode())
             {
                 ReturnToEditor();
                 return;
             }
+
+            // IMPORTANT: successful-frame freeze is lifted only here, directly
+            // before the next attempt is rebuilt.
+            SuccessFreeze.Unfreeze();
 
             BuiltInPractice.Configure(StartFloor, EndFloor);
 
@@ -573,6 +553,56 @@ namespace PracticeStats
             graceFrames = 20;
             lastDeaths = deaths;
             Main.SetStatus("Next attempt");
+        }
+
+        private void TickComplete()
+        {
+            // If ESC already returned to edit mode, finish immediately instead
+            // of waiting for another input that gameplay can no longer receive.
+            if (EditorBridge.Exists() && !EditorBridge.IsPlayMode())
+            {
+                CompleteSession();
+                return;
+            }
+
+            if (!continueRequested)
+            {
+                if (!GameBridge.AnyValidInputWasTriggered()) return;
+
+                continueRequested = true;
+                continueDelay = 2;
+                return;
+            }
+
+            if (continueDelay-- > 0) return;
+
+            CompleteSession();
+        }
+
+        private void CompleteSession()
+        {
+            // COMPLETE must never schedule another attempt.
+            SuccessFreeze.Unfreeze();
+
+            Running = false;
+            initializing = false;
+            WaitingForSuccessContinue = false;
+            FailScreenActive = false;
+            failCounted = false;
+            continueRequested = false;
+            endpointRearmFrames = 0;
+
+            SuccessFreeze.Unfreeze();
+            BuiltInPractice.Disable();
+            GameBridge.SetPlayersResponsive(true);
+            GameBridge.UnlockPlayerInput();
+
+            // Explicitly return to editor. The previous implementation only
+            // stopped PracticeStats while leaving ADOFAI sitting in Won/Fail.
+            EditorBridge.SwitchToEditMode();
+            EditorBridge.RestoreRangeSelection(StartFloor, EndFloor);
+
+            Main.SetStatus("Completed - returned to editor");
         }
 
         private void TickInitialization()
@@ -893,6 +923,7 @@ namespace PracticeStats
         private static MethodInfo playNoArgs;
         private static MethodInfo playWithArgs;
         private static MethodInfo multiSelectFloorsMethod;
+        private static MethodInfo switchToEditModeMethod;
         private static bool resolved;
 
         public static bool Exists()
@@ -994,6 +1025,24 @@ namespace PracticeStats
             return false;
         }
 
+        public static bool SwitchToEditMode()
+        {
+            object editor = Instance();
+            if (editor == null || switchToEditModeMethod == null)
+                return false;
+
+            try
+            {
+                switchToEditModeMethod.Invoke(editor, new object[] { false });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Main.Log("SwitchToEditMode error: " + ex.Message);
+                return false;
+            }
+        }
+
         public static bool RestoreRangeSelection(int startFloor, int endFloor)
         {
             object editor = Instance();
@@ -1068,6 +1117,13 @@ namespace PracticeStats
                 ParameterInfo[] p = m.GetParameters();
                 return p.Length == 3 &&
                        p[2].ParameterType == typeof(bool);
+            });
+
+            switchToEditModeMethod = methods.FirstOrDefault(m =>
+            {
+                if (m.Name != "SwitchToEditMode") return false;
+                ParameterInfo[] p = m.GetParameters();
+                return p.Length == 1 && p[0].ParameterType == typeof(bool);
             });
         }
 
@@ -1509,6 +1565,176 @@ namespace PracticeStats
             }
 
             return false;
+        }
+    }
+
+    internal static class SuccessFreeze
+    {
+        private static bool frozen;
+
+        private static Type timeType;
+        private static PropertyInfo timeScaleProperty;
+        private static Type audioListenerType;
+        private static PropertyInfo audioPauseProperty;
+
+        private static Type cameraType;
+        private static MemberInfo cameraInstanceMember;
+        private static MemberInfo cameraEnabledMember;
+
+        private static Type vfxType;
+        private static MemberInfo vfxInstanceMember;
+        private static MemberInfo vfxEnabledMember;
+
+        private static float previousTimeScale = 1f;
+        private static bool previousAudioPause;
+        private static bool previousCameraEnabled = true;
+        private static bool previousVfxEnabled = true;
+        private static bool resolved;
+
+        public static void Freeze()
+        {
+            if (frozen) return;
+            Resolve();
+
+            try
+            {
+                if (timeScaleProperty != null)
+                {
+                    object raw = timeScaleProperty.GetValue(null, null);
+                    if (raw != null)
+                        previousTimeScale = Convert.ToSingle(raw);
+                    timeScaleProperty.SetValue(null, 0f, null);
+                }
+            }
+            catch { }
+
+            try
+            {
+                if (audioPauseProperty != null)
+                {
+                    object raw = audioPauseProperty.GetValue(null, null);
+                    if (raw is bool) previousAudioPause = (bool)raw;
+                    audioPauseProperty.SetValue(null, true, null);
+                }
+            }
+            catch { }
+
+            previousCameraEnabled = ReadEnabled(cameraInstanceMember, cameraEnabledMember, true);
+            previousVfxEnabled = ReadEnabled(vfxInstanceMember, vfxEnabledMember, true);
+
+            WriteEnabled(cameraInstanceMember, cameraEnabledMember, false);
+            WriteEnabled(vfxInstanceMember, vfxEnabledMember, false);
+
+            frozen = true;
+        }
+
+        public static void Unfreeze()
+        {
+            if (!frozen) return;
+            Resolve();
+
+            // Restore runtime systems BEFORE ResetCustomLevel/Play reconstructs
+            // the next attempt, so the new camera/VFX state can initialize normally.
+            WriteEnabled(cameraInstanceMember, cameraEnabledMember, previousCameraEnabled);
+            WriteEnabled(vfxInstanceMember, vfxEnabledMember, previousVfxEnabled);
+
+            try
+            {
+                if (timeScaleProperty != null)
+                    timeScaleProperty.SetValue(
+                        null,
+                        previousTimeScale > 0f ? previousTimeScale : 1f,
+                        null);
+            }
+            catch { }
+
+            try
+            {
+                if (audioPauseProperty != null)
+                    audioPauseProperty.SetValue(null, previousAudioPause, null);
+            }
+            catch { }
+
+            GameBridge.SetPlayersResponsive(true);
+            GameBridge.UnlockPlayerInput();
+
+            frozen = false;
+        }
+
+        private static void Resolve()
+        {
+            if (resolved) return;
+            resolved = true;
+
+            const BindingFlags all =
+                BindingFlags.Public | BindingFlags.NonPublic |
+                BindingFlags.Static | BindingFlags.Instance;
+
+            timeType = Type.GetType("UnityEngine.Time, UnityEngine.CoreModule", false);
+            if (timeType != null)
+                timeScaleProperty = timeType.GetProperty(
+                    "timeScale",
+                    BindingFlags.Public | BindingFlags.Static);
+
+            audioListenerType = Type.GetType("UnityEngine.AudioListener, UnityEngine.AudioModule", false);
+            if (audioListenerType != null)
+                audioPauseProperty = audioListenerType.GetProperty(
+                    "pause",
+                    BindingFlags.Public | BindingFlags.Static);
+
+            cameraType = ReflectionUtil.FindType("scrCamera");
+            if (cameraType != null)
+            {
+                cameraInstanceMember = ReflectionUtil.FindMember(cameraType, "instance", all);
+                cameraEnabledMember = ReflectionUtil.FindMember(cameraType, "enabled", all);
+            }
+
+            vfxType = ReflectionUtil.FindType("scrVfxPlus");
+            if (vfxType != null)
+            {
+                vfxInstanceMember = ReflectionUtil.FindMember(vfxType, "instance", all);
+                vfxEnabledMember = ReflectionUtil.FindMember(vfxType, "enabled", all);
+            }
+        }
+
+        private static bool ReadEnabled(
+            MemberInfo instanceMember,
+            MemberInfo enabledMember,
+            bool fallback)
+        {
+            try
+            {
+                if (instanceMember == null || enabledMember == null)
+                    return fallback;
+
+                object instance = ReflectionUtil.ReadMember(null, instanceMember);
+                if (instance == null) return fallback;
+
+                object raw = ReflectionUtil.ReadMember(instance, enabledMember);
+                return raw is bool ? (bool)raw : fallback;
+            }
+            catch
+            {
+                return fallback;
+            }
+        }
+
+        private static void WriteEnabled(
+            MemberInfo instanceMember,
+            MemberInfo enabledMember,
+            bool value)
+        {
+            try
+            {
+                if (instanceMember == null || enabledMember == null)
+                    return;
+
+                object instance = ReflectionUtil.ReadMember(null, instanceMember);
+                if (instance == null) return;
+
+                ReflectionUtil.WriteMember(instance, enabledMember, value);
+            }
+            catch { }
         }
     }
 
