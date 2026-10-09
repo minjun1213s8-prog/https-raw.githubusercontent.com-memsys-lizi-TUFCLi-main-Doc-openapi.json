@@ -270,6 +270,7 @@ namespace PracticeStats
         private int graceFrames;
         private int lastDeaths = -1;
         private bool failCounted;
+        private bool attemptPending;
 
         private bool initializing;
         private int initializeStage;
@@ -332,6 +333,7 @@ namespace PracticeStats
             WaitingForSuccessContinue = false;
             FailScreenActive = false;
             failCounted = false;
+            attemptPending = false;
             continueRequested = false;
             continueDelay = 0;
             endpointRearmFrames = 0;
@@ -355,6 +357,7 @@ namespace PracticeStats
             failCounted = false;
             initializing = false;
             continueRequested = false;
+            attemptPending = false;
             endpointRearmFrames = 0;
             SuccessFreeze.Unfreeze();
             BuiltInPractice.Disable();
@@ -366,6 +369,7 @@ namespace PracticeStats
         {
             Successes = 0;
             Failures = 0;
+            attemptPending = false;
             CurrentStreak = 0;
             BestStreak = 0;
             Completed = false;
@@ -436,6 +440,7 @@ namespace PracticeStats
             if ((deathIncreased || isFail) && !failCounted)
             {
                 RecordFail();
+                attemptPending = false;
                 failCounted = true;
                 FailScreenActive = true;
 
@@ -466,6 +471,7 @@ namespace PracticeStats
                     endpointRearmFrames = 6;
 
                     failCounted = false;
+                    attemptPending = true;
                     FailScreenActive = false;
                     graceFrames = 12;
                     lastDeaths = deaths;
@@ -491,6 +497,7 @@ namespace PracticeStats
             if (isWon)
             {
                 RecordSuccess();
+                attemptPending = false;
                 Completed = TotalAttempts >= TargetAttempts;
                 WaitingForSuccessContinue = true;
                 continueRequested = false;
@@ -502,7 +509,7 @@ namespace PracticeStats
 
                 Main.SetStatus(
                     Completed
-                        ? "Completed - press any key to return to editor"
+                        ? "Completed - press ESC to return to editor"
                         : "Success - press any key");
             }
         }
@@ -545,6 +552,7 @@ namespace PracticeStats
             }
 
             endpointRearmFrames = 8;
+            attemptPending = true;
 
             WaitingForSuccessContinue = false;
             FailScreenActive = false;
@@ -664,6 +672,7 @@ namespace PracticeStats
                 endpointRearmFrames = Math.Max(endpointRearmFrames, 4);
 
                 initializing = false;
+                attemptPending = true;
                 failCounted = false;
                 WaitingForSuccessContinue = false;
                 FailScreenActive = false;
