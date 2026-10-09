@@ -25,7 +25,7 @@ namespace PracticeStats
             modEntry.OnGUI = OnGUI;
             modEntry.OnSaveGUI = OnSaveGUI;
             modEntry.OnUnload = OnUnload;
-            Log("PracticeStats v0.4.3 loaded (ADOFAI 3.4.0 target).");
+            Log("PracticeStats v0.4.4 loaded (ADOFAI 3.4.0 target).");
             return true;
         }
 
@@ -81,7 +81,7 @@ namespace PracticeStats
             {
                 SyncRangeFromEditor(false);
 
-                RGui.Label("PracticeStats v0.4.3 - ADOFAI 3.4.0");
+                RGui.Label("PracticeStats v0.4.4 - ADOFAI 3.4.0");
                 RGui.Label("Uses ADOFAI built-in practice mode");
                 RGui.Label("Range: editor Shift + Left Click selection");
                 RGui.Space(6f);
@@ -475,6 +475,18 @@ namespace PracticeStats
             }
 
             bool isWon = ContainsState(state, "Won");
+
+            // Native practice portals ultimately call scrController.OnLandOnPortal().
+            // If a rebuilt editor attempt lost the portal's runtime trigger, call the
+            // SAME native finish method when the player reaches the selected end tile.
+            // Statistics still count only after the controller actually enters Won.
+            if (!isWon && current >= EndFloor)
+            {
+                GameBridge.TriggerNativePracticeFinish();
+                state = GameBridge.StateName();
+                isWon = ContainsState(state, "Won");
+            }
+
             if (isWon)
             {
                 RecordSuccess();
@@ -1174,8 +1186,13 @@ namespace PracticeStats
         private static MemberInfo stateMember;
         private static MemberInfo checkpointsUsedMember;
         private static MemberInfo transitioningLevelMember;
+        private static MemberInfo winTimeMember;
+        private static MemberInfo chosenPlanetMember;
         private static MethodInfo resetCustomLevelMethod;
         private static MethodInfo startCoroutineMethod;
+        private static MethodInfo onLandOnPortalMethod;
+        private static Type portalType;
+        private static object endOfLevelPortal;
         private static bool resolved;
 
         public static object Controller()
@@ -1245,6 +1262,36 @@ namespace PracticeStats
             catch { }
         }
 
+        public static bool TriggerNativePracticeFinish()
+        {
+            object controller = Controller();
+            if (controller == null) return false;
+
+            Resolve();
+
+            try
+            {
+                if (onLandOnPortalMethod == null ||
+                    chosenPlanetMember == null ||
+                    endOfLevelPortal == null)
+                    return false;
+
+                object planet = ReflectionUtil.ReadMember(controller, chosenPlanetMember);
+                if (planet == null) return false;
+
+                onLandOnPortalMethod.Invoke(
+                    controller,
+                    new object[] { planet, endOfLevelPortal, null });
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Main.Log("Native practice finish error: " + ex.Message);
+                return false;
+            }
+        }
+
         public static bool RestartCustomLevelBuiltIn(bool remakeFloors)
         {
             object controller = Controller();
@@ -1256,6 +1303,16 @@ namespace PracticeStats
             {
                 if (resetCustomLevelMethod == null || startCoroutineMethod == null)
                     return false;
+
+                // OnLandOnPortal is guarded by "if (winTime != 0) return;".
+                // Awake_Rewind normally clears this latch, but editor
+                // ResetCustomLevel() does not call Awake_Rewind again.
+                // Re-arm the native win path before EVERY attempt.
+                if (winTimeMember != null)
+                    ReflectionUtil.WriteMember(controller, winTimeMember, 0f);
+
+                if (transitioningLevelMember != null)
+                    ReflectionUtil.WriteMember(controller, transitioningLevelMember, false);
 
                 object routine = resetCustomLevelMethod.Invoke(
                     controller,
@@ -1295,6 +1352,23 @@ namespace PracticeStats
             deathsMember = ReflectionUtil.FindMember(controllerType, "deaths", all);
             checkpointsUsedMember = ReflectionUtil.FindMember(controllerType, "checkpointsUsed", all);
             transitioningLevelMember = ReflectionUtil.FindMember(controllerType, "transitioningLevel", all);
+            winTimeMember = ReflectionUtil.FindMember(controllerType, "winTime", all);
+            chosenPlanetMember = ReflectionUtil.FindMember(controllerType, "chosenPlanet", all);
+
+            portalType = ReflectionUtil.FindType("Portal");
+            if (portalType != null && portalType.IsEnum)
+            {
+                try { endOfLevelPortal = Enum.Parse(portalType, "EndOfLevel", true); }
+                catch { endOfLevelPortal = null; }
+            }
+
+            onLandOnPortalMethod = controllerType.GetMethods(all)
+                .FirstOrDefault(m =>
+                {
+                    if (m.Name != "OnLandOnPortal") return false;
+                    ParameterInfo[] p = m.GetParameters();
+                    return p.Length == 3;
+                });
 
             resetCustomLevelMethod = controllerType.GetMethods(all)
                 .FirstOrDefault(m =>
