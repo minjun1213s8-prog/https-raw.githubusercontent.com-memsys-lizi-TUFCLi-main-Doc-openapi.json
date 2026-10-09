@@ -25,7 +25,7 @@ namespace PracticeStats
             modEntry.OnGUI = OnGUI;
             modEntry.OnSaveGUI = OnSaveGUI;
             modEntry.OnUnload = OnUnload;
-            Log("PracticeStats v0.4.0 loaded (ADOFAI 3.4.0 target).");
+            Log("PracticeStats v0.4.1 loaded (ADOFAI 3.4.0 target).");
             return true;
         }
 
@@ -81,7 +81,7 @@ namespace PracticeStats
             {
                 SyncRangeFromEditor(false);
 
-                RGui.Label("PracticeStats - ADOFAI 3.4.0");
+                RGui.Label("PracticeStats v0.4.1 - ADOFAI 3.4.0");
                 RGui.Label("Uses ADOFAI built-in practice mode");
                 RGui.Label("Range: editor Shift + Left Click selection");
                 RGui.Space(6f);
@@ -268,9 +268,18 @@ namespace PracticeStats
         public float SuccessRate { get { return TotalAttempts == 0 ? 0f : Successes * 100f / TotalAttempts; } }
 
         private int graceFrames;
-        private int resultInputDelay;
         private int lastDeaths = -1;
         private bool failCounted;
+
+        // The editor clears GCS.practiceMode while setting up its first playback.
+        // Therefore a new PracticeStats session is bootstrapped in two phases:
+        // 1) let scnEditor.Play() create the normal editor-play runtime;
+        // 2) enable ADOFAI practice mode and use scrController.ResetCustomLevel()
+        //    to restart the actual first counted attempt.
+        private bool initializing;
+        private int initializeStage;
+        private int initializeDelay;
+        private int initializeTimeout;
 
         public bool CanStart(out string reason)
         {
@@ -307,25 +316,28 @@ namespace PracticeStats
             if (TotalAttempts >= TargetAttempts)
                 ResetStats();
 
-            BuiltInPractice.Configure(StartFloor, EndFloor);
+            BuiltInPractice.Disable();
 
-            // ADOFAI's editor Play() starts from tile 0 when multiple floors are selected.
-            // PracticeStats already cached the user's Shift-selection above, so collapse
-            // the editor selection to the first tile and call ADOFAI's own Play().
+            // ADOFAI's own editor Play() starts at tile 0 when multiple floors are
+            // selected. The Shift-range has already been cached by PracticeStats,
+            // so temporarily collapse selection to the first tile and use Play().
             if (!EditorBridge.PlayFromSingleFloor(StartFloor))
-            {
-                BuiltInPractice.Disable();
                 return false;
-            }
 
             Running = true;
             Completed = false;
             WaitingForSuccessContinue = false;
             FailScreenActive = false;
             failCounted = false;
-            graceFrames = 24;
-            resultInputDelay = 0;
+
+            initializing = true;
+            initializeStage = 0;
+            initializeDelay = 2;
+            initializeTimeout = 240;
+            graceFrames = 0;
             lastDeaths = GameBridge.Deaths();
+
+            Main.SetStatus("Preparing built-in practice mode");
             return true;
         }
 
@@ -335,6 +347,7 @@ namespace PracticeStats
             WaitingForSuccessContinue = false;
             FailScreenActive = false;
             failCounted = false;
+            initializing = false;
             BuiltInPractice.Disable();
         }
 
@@ -352,46 +365,49 @@ namespace PracticeStats
         {
             if (!Running) return;
 
-            if (WaitingForSuccessContinue)
+            if (initializing)
             {
-                if (resultInputDelay > 0)
-                {
-                    resultInputDelay--;
-                    return;
-                }
-
-                if (!UnityBridge.AnyKeyDown()) return;
-
-                if (Completed || TotalAttempts >= TargetAttempts)
-                {
-                    Running = false;
-                    BuiltInPractice.Disable();
-                    Main.SetStatus("Completed");
-                    return;
-                }
-
-                BuiltInPractice.Configure(StartFloor, EndFloor);
-                if (!CustomLevelBridge.Restart(StartFloor))
-                {
-                    Running = false;
-                    BuiltInPractice.Disable();
-                    Main.SetStatus("Could not restart practice attempt");
-                    return;
-                }
-
-                WaitingForSuccessContinue = false;
-                FailScreenActive = false;
-                failCounted = false;
-                graceFrames = 20;
-                resultInputDelay = 0;
-                lastDeaths = GameBridge.Deaths();
-                Main.SetStatus("Next attempt");
+                TickInitialization();
                 return;
             }
 
             string state = GameBridge.StateName();
             int current = GameBridge.CurrentFloor();
             int deaths = GameBridge.Deaths();
+
+            // On a normal (non-final) clear, DO NOT read or consume the user's
+            // continue key. ADOFAI's own Won/practice flow gets that input and
+            // performs its own ResetCustomLevel. We only observe the restart.
+            if (WaitingForSuccessContinue)
+            {
+                if (Completed || TotalAttempts >= TargetAttempts)
+                {
+                    if (UnityBridge.AnyKeyDown())
+                    {
+                        Running = false;
+                        WaitingForSuccessContinue = false;
+                        BuiltInPractice.Disable();
+                        Main.SetStatus("Completed");
+                    }
+                    return;
+                }
+
+                bool stillWon = ContainsState(state, "Won");
+                if (stillWon)
+                    return;
+
+                if (current >= StartFloor && current < EndFloor)
+                {
+                    WaitingForSuccessContinue = false;
+                    FailScreenActive = false;
+                    failCounted = false;
+                    graceFrames = 12;
+                    lastDeaths = deaths;
+                    Main.SetStatus("Next attempt");
+                }
+
+                return;
+            }
 
             if (graceFrames > 0)
             {
@@ -425,35 +441,112 @@ namespace PracticeStats
 
             if (failCounted)
             {
+                if (Completed || TotalAttempts >= TargetAttempts)
+                {
+                    if (UnityBridge.AnyKeyDown())
+                    {
+                        Running = false;
+                        FailScreenActive = false;
+                        BuiltInPractice.Disable();
+                        Main.SetStatus("Completed");
+                    }
+                    return;
+                }
+
                 if (isFail)
                 {
                     FailScreenActive = true;
                     return;
                 }
 
-                // The built-in Fail2 flow restarts the custom level after input.
+                // ADOFAI's Fail2 flow owns the continue input and restarts the
+                // custom level. Once it returns to the selected range, arm the
+                // next attempt without consuming that input ourselves.
                 if (current >= StartFloor && current < EndFloor)
                 {
                     failCounted = false;
                     FailScreenActive = false;
                     graceFrames = 12;
                     lastDeaths = deaths;
-                    return;
+                    Main.SetStatus("Next attempt");
                 }
+
+                return;
             }
 
+            // Success is counted only when ADOFAI itself reaches Won.
+            // Do not use currentFloor >= EndFloor as a fallback: if the native
+            // practice endpoint was not installed, letting the chart continue
+            // is a setup failure rather than a successful attempt.
             bool isWon = ContainsState(state, "Won");
-            if (!failCounted && !WaitingForSuccessContinue && (isWon || current >= EndFloor))
+            if (isWon)
             {
                 RecordSuccess();
                 Completed = TotalAttempts >= TargetAttempts;
                 WaitingForSuccessContinue = true;
-                resultInputDelay = 15;
 
                 Main.SetStatus(
                     Completed
                         ? "Completed"
                         : "Success - press any key");
+            }
+        }
+
+        private void TickInitialization()
+        {
+            if (initializeTimeout-- <= 0)
+            {
+                Running = false;
+                initializing = false;
+                BuiltInPractice.Disable();
+                Main.SetStatus("Practice initialization timed out");
+                return;
+            }
+
+            if (initializeDelay > 0)
+            {
+                initializeDelay--;
+                return;
+            }
+
+            if (initializeStage == 0)
+            {
+                // scnEditor.Play() has now finished its own initialization and
+                // any practiceMode reset it performs has already happened.
+                BuiltInPractice.Configure(StartFloor, EndFloor);
+
+                // Use ADOFAI's native restart coroutine, not a manual reset.
+                // This installs the practice endpoint/portal on the FIRST attempt.
+                if (!GameBridge.RestartCustomLevelBuiltIn(true))
+                {
+                    Running = false;
+                    initializing = false;
+                    BuiltInPractice.Disable();
+                    Main.SetStatus("Could not initialize built-in practice mode");
+                    return;
+                }
+
+                initializeStage = 1;
+                initializeDelay = 2;
+                return;
+            }
+
+            string state = GameBridge.StateName();
+            int current = GameBridge.CurrentFloor();
+
+            bool invalidState =
+                ContainsState(state, "Won") ||
+                ContainsState(state, "Fail");
+
+            if (!invalidState && current >= StartFloor && current < EndFloor)
+            {
+                initializing = false;
+                failCounted = false;
+                WaitingForSuccessContinue = false;
+                FailScreenActive = false;
+                graceFrames = 12;
+                lastDeaths = GameBridge.Deaths();
+                Main.SetStatus("Practice started");
             }
         }
 
@@ -829,6 +922,8 @@ namespace PracticeStats
         private static MemberInfo stateMember;
         private static MemberInfo checkpointsUsedMember;
         private static MemberInfo transitioningLevelMember;
+        private static MethodInfo resetCustomLevelMethod;
+        private static MethodInfo startCoroutineMethod;
         private static bool resolved;
 
         public static object Controller()
@@ -898,6 +993,39 @@ namespace PracticeStats
             catch { }
         }
 
+        public static bool RestartCustomLevelBuiltIn(bool remakeFloors)
+        {
+            object controller = Controller();
+            if (controller == null) return false;
+
+            Resolve();
+
+            try
+            {
+                if (resetCustomLevelMethod == null || startCoroutineMethod == null)
+                    return false;
+
+                object routine = resetCustomLevelMethod.Invoke(
+                    controller,
+                    new object[] { remakeFloors });
+
+                IEnumerator enumerator = routine as IEnumerator;
+                if (enumerator == null)
+                    return false;
+
+                startCoroutineMethod.Invoke(
+                    controller,
+                    new object[] { enumerator });
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Main.Log("Built-in ResetCustomLevel error: " + ex);
+                return false;
+            }
+        }
+
         private static void Resolve()
         {
             if (resolved) return;
@@ -915,6 +1043,23 @@ namespace PracticeStats
             deathsMember = ReflectionUtil.FindMember(controllerType, "deaths", all);
             checkpointsUsedMember = ReflectionUtil.FindMember(controllerType, "checkpointsUsed", all);
             transitioningLevelMember = ReflectionUtil.FindMember(controllerType, "transitioningLevel", all);
+
+            resetCustomLevelMethod = controllerType.GetMethods(all)
+                .FirstOrDefault(m =>
+                {
+                    if (m.Name != "ResetCustomLevel") return false;
+                    ParameterInfo[] p = m.GetParameters();
+                    return p.Length == 1 && p[0].ParameterType == typeof(bool);
+                });
+
+            startCoroutineMethod = controllerType.GetMethods(all)
+                .FirstOrDefault(m =>
+                {
+                    if (m.Name != "StartCoroutine") return false;
+                    ParameterInfo[] p = m.GetParameters();
+                    return p.Length == 1 &&
+                           typeof(IEnumerator).IsAssignableFrom(p[0].ParameterType);
+                });
 
             stateMember =
                 ReflectionUtil.FindMember(controllerType, "state", all) ??
