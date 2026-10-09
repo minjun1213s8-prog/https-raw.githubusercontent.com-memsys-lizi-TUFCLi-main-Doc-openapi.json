@@ -25,7 +25,7 @@ namespace PracticeStats
             modEntry.OnGUI = OnGUI;
             modEntry.OnSaveGUI = OnSaveGUI;
             modEntry.OnUnload = OnUnload;
-            Log("PracticeStats v0.3.0 loaded (ADOFAI 3.4.0 target).");
+            Log("PracticeStats v0.4.0 loaded (ADOFAI 3.4.0 target).");
             return true;
         }
 
@@ -52,11 +52,14 @@ namespace PracticeStats
         private static void OnUpdate(UnityModManager.ModEntry entry, float deltaTime)
         {
             if (!enabled) return;
+
             try
             {
                 SyncRangeFromEditor(false);
 
-                if (UnityBridge.GetKeyDown("F8")) TogglePractice();
+                if (UnityBridge.GetKeyDown("F8"))
+                    TogglePractice();
+
                 if (UnityBridge.GetKeyDown("F9"))
                 {
                     session.ResetStats();
@@ -64,14 +67,11 @@ namespace PracticeStats
                 }
 
                 session.Tick();
-                if (session.Completed && !session.WaitingForContinue)
-                    status = "Completed";
-
                 UpdateRuntimeOverlay();
             }
             catch (Exception ex)
             {
-                Log("Update error: " + ex.Message);
+                Log("Update error: " + ex);
             }
         }
 
@@ -82,23 +82,25 @@ namespace PracticeStats
                 SyncRangeFromEditor(false);
 
                 RGui.Label("PracticeStats - ADOFAI 3.4.0");
-                RGui.Label("Range source: editor selection (Shift + Left Click)");
+                RGui.Label("Uses ADOFAI built-in practice mode");
+                RGui.Label("Range: editor Shift + Left Click selection");
                 RGui.Space(6f);
 
                 if (hasEditorRange)
-                    RGui.Label("Selected range: " + session.StartFloor + " -> " + session.EndFloor + " (" + selectedCount + " tiles selected)");
+                    RGui.Label("Selected range: " + session.StartFloor + " -> " + session.EndFloor + " (" + selectedCount + " tiles)");
+                else if (session.Running)
+                    RGui.Label("Active range: " + session.StartFloor + " -> " + session.EndFloor);
                 else
-                {
                     RGui.Label("Selected range: none");
-                    RGui.Label("In the level editor, select a tile range with Shift + Left Click.");
-                }
 
                 RGui.Space(6f);
                 RGui.Label("Target attempts");
                 attemptsText = RGui.TextField(attemptsText);
 
                 RGui.Space(6f);
-                if (RGui.Button(session.Running ? "Stop practice" : "Start practice")) TogglePractice();
+                if (RGui.Button(session.Running ? "Stop practice" : "Start practice"))
+                    TogglePractice();
+
                 if (RGui.Button("Reset stats"))
                 {
                     session.ResetStats();
@@ -109,14 +111,13 @@ namespace PracticeStats
                 RGui.Label("Attempts: " + session.TotalAttempts + " / " + session.TargetAttempts);
                 RGui.Label("Success: " + session.Successes + "    Fail: " + session.Failures);
                 RGui.Label("Success rate: " + session.SuccessRate.ToString("0.00") + "%");
-                RGui.Label("Streak: " + session.CurrentStreak + "    Best: " + session.BestStreak);
                 RGui.Label("Status: " + status);
                 RGui.Space(6f);
                 RGui.Label("Hotkeys: F8 start/stop, F9 reset");
             }
             catch (Exception ex)
             {
-                Log("GUI error: " + ex.Message);
+                Log("GUI error: " + ex);
             }
         }
 
@@ -143,11 +144,13 @@ namespace PracticeStats
             bool changed = !hasEditorRange || session.StartFloor != start || session.EndFloor != end;
             hasEditorRange = true;
             selectedCount = count;
+
             if (!changed) return;
 
             session.StartFloor = start;
             session.EndFloor = end;
-            if (session.TotalAttempts > 0) session.ResetStats();
+            if (session.TotalAttempts > 0)
+                session.ResetStats();
 
             if (announce || changed)
                 status = "Range set: " + start + " -> " + end;
@@ -178,7 +181,12 @@ namespace PracticeStats
                 return;
             }
 
-            session.Start();
+            if (!session.Start())
+            {
+                status = "Could not start ADOFAI practice mode";
+                return;
+            }
+
             status = "Practice started";
         }
 
@@ -200,10 +208,19 @@ namespace PracticeStats
 
             int remaining = Math.Max(0, session.TargetAttempts - session.TotalAttempts);
             string prompt = "";
-            if (session.WaitingForContinue)
+
+            if (session.WaitingForSuccessContinue)
+            {
                 prompt = session.Completed
-                    ? "\n\nCOMPLETE - press any key"
-                    : "\n\nSUCCESS - press any key for next attempt";
+                    ? "\n\nCOMPLETE"
+                    : "\n\nSUCCESS - press any key";
+            }
+            else if (session.FailScreenActive)
+            {
+                prompt = session.Completed
+                    ? "\n\nCOMPLETE"
+                    : "\n\nFAIL - press any key";
+            }
 
             string text =
                 "PracticeStats\n" +
@@ -222,7 +239,11 @@ namespace PracticeStats
 
         internal static void Log(string text)
         {
-            try { if (mod != null && mod.Logger != null) mod.Logger.Log("[PracticeStats] " + text); }
+            try
+            {
+                if (mod != null && mod.Logger != null)
+                    mod.Logger.Log("[PracticeStats] " + text);
+            }
             catch { }
         }
     }
@@ -232,54 +253,89 @@ namespace PracticeStats
         public int StartFloor = 0;
         public int EndFloor = 1;
         public int TargetAttempts = 100;
+
         public int Successes { get; private set; }
         public int Failures { get; private set; }
         public int CurrentStreak { get; private set; }
         public int BestStreak { get; private set; }
+
         public bool Running { get; private set; }
         public bool Completed { get; private set; }
-        public bool WaitingForContinue { get; private set; }
-        public int TotalAttempts { get { return Successes + Failures; } }
-        public float SuccessRate { get { return TotalAttempts == 0 ? 0f : (Successes * 100f / TotalAttempts); } }
+        public bool WaitingForSuccessContinue { get; private set; }
+        public bool FailScreenActive { get; private set; }
 
-        private bool attemptActive;
-        private bool startPending;
-        private int startDelay;
-        private int ignoreFrames;
-        private int continueDelay;
+        public int TotalAttempts { get { return Successes + Failures; } }
+        public float SuccessRate { get { return TotalAttempts == 0 ? 0f : Successes * 100f / TotalAttempts; } }
+
+        private int graceFrames;
+        private int resultInputDelay;
         private int lastDeaths = -1;
-        private bool failLatched;
+        private bool failCounted;
 
         public bool CanStart(out string reason)
         {
-            if (EndFloor <= StartFloor) { reason = "End tile must be after start tile"; return false; }
-            if (TargetAttempts < 1) { reason = "Target attempts must be at least 1"; return false; }
-            if (!EditorBridge.Exists()) { reason = "Open the level editor first"; return false; }
+            if (EndFloor <= StartFloor)
+            {
+                reason = "End tile must be after start tile";
+                return false;
+            }
+
+            if (TargetAttempts < 1)
+            {
+                reason = "Target attempts must be at least 1";
+                return false;
+            }
+
+            if (!EditorBridge.Exists())
+            {
+                reason = "Open the level editor first";
+                return false;
+            }
+
+            if (EditorBridge.IsPlayMode())
+            {
+                reason = "Stop editor playback before starting PracticeStats";
+                return false;
+            }
+
             reason = null;
             return true;
         }
 
-        public void Start()
+        public bool Start()
         {
-            FreezeManager.Unfreeze();
-            if (TotalAttempts >= TargetAttempts) ResetStats();
+            if (TotalAttempts >= TargetAttempts)
+                ResetStats();
+
+            BuiltInPractice.Configure(StartFloor, EndFloor);
+
+            // ADOFAI's editor Play() starts from tile 0 when multiple floors are selected.
+            // PracticeStats already cached the user's Shift-selection above, so collapse
+            // the editor selection to the first tile and call ADOFAI's own Play().
+            if (!EditorBridge.PlayFromSingleFloor(StartFloor))
+            {
+                BuiltInPractice.Disable();
+                return false;
+            }
+
             Running = true;
             Completed = false;
-            WaitingForContinue = false;
-            attemptActive = false;
-            failLatched = false;
+            WaitingForSuccessContinue = false;
+            FailScreenActive = false;
+            failCounted = false;
+            graceFrames = 24;
+            resultInputDelay = 0;
             lastDeaths = GameBridge.Deaths();
-            ScheduleStart(1);
+            return true;
         }
 
         public void Stop()
         {
-            FreezeManager.Unfreeze();
             Running = false;
-            WaitingForContinue = false;
-            attemptActive = false;
-            startPending = false;
-            failLatched = false;
+            WaitingForSuccessContinue = false;
+            FailScreenActive = false;
+            failCounted = false;
+            BuiltInPractice.Disable();
         }
 
         public void ResetStats()
@@ -296,156 +352,213 @@ namespace PracticeStats
         {
             if (!Running) return;
 
-            if (WaitingForContinue)
+            if (WaitingForSuccessContinue)
             {
-                if (continueDelay > 0)
+                if (resultInputDelay > 0)
                 {
-                    continueDelay--;
+                    resultInputDelay--;
                     return;
                 }
 
                 if (!UnityBridge.AnyKeyDown()) return;
 
-                FreezeManager.Unfreeze();
-                WaitingForContinue = false;
-
                 if (Completed || TotalAttempts >= TargetAttempts)
                 {
                     Running = false;
-                    Completed = true;
+                    BuiltInPractice.Disable();
                     Main.SetStatus("Completed");
                     return;
                 }
 
+                BuiltInPractice.Configure(StartFloor, EndFloor);
+                if (!CustomLevelBridge.Restart(StartFloor))
+                {
+                    Running = false;
+                    BuiltInPractice.Disable();
+                    Main.SetStatus("Could not restart practice attempt");
+                    return;
+                }
+
+                WaitingForSuccessContinue = false;
+                FailScreenActive = false;
+                failCounted = false;
+                graceFrames = 20;
+                resultInputDelay = 0;
+                lastDeaths = GameBridge.Deaths();
                 Main.SetStatus("Next attempt");
-                ScheduleStart(2);
                 return;
             }
 
-            if (startPending)
-            {
-                HandleStartPending();
-                return;
-            }
-
-            if (ignoreFrames > 0)
-            {
-                ignoreFrames--;
-                return;
-            }
-
+            string state = GameBridge.StateName();
             int current = GameBridge.CurrentFloor();
-            if (current < 0) return;
-
             int deaths = GameBridge.Deaths();
-            bool failedNow = GameBridge.IsFailed();
+
+            if (graceFrames > 0)
+            {
+                graceFrames--;
+                if (deaths >= 0) lastDeaths = deaths;
+                return;
+            }
+
             bool deathIncreased = deaths >= 0 && lastDeaths >= 0 && deaths > lastDeaths;
             if (deaths >= 0) lastDeaths = deaths;
 
-            if (attemptActive && (deathIncreased || (failedNow && !failLatched)))
+            bool isFail = ContainsState(state, "Fail");
+
+            if ((deathIncreased || isFail) && !failCounted)
             {
-                failLatched = true;
                 RecordFail();
+                failCounted = true;
+                FailScreenActive = true;
+
+                if (TotalAttempts >= TargetAttempts)
+                {
+                    Completed = true;
+                    Main.SetStatus("Completed");
+                }
+                else
+                {
+                    Main.SetStatus("Fail - press any key");
+                }
                 return;
             }
 
-            failLatched = failedNow;
-
-            if (!attemptActive)
+            if (failCounted)
             {
-                if (current >= StartFloor && current < EndFloor) attemptActive = true;
-                return;
+                if (isFail)
+                {
+                    FailScreenActive = true;
+                    return;
+                }
+
+                // The built-in Fail2 flow restarts the custom level after input.
+                if (current >= StartFloor && current < EndFloor)
+                {
+                    failCounted = false;
+                    FailScreenActive = false;
+                    graceFrames = 12;
+                    lastDeaths = deaths;
+                    return;
+                }
             }
 
-            if (current >= EndFloor)
+            bool isWon = ContainsState(state, "Won");
+            if (!failCounted && !WaitingForSuccessContinue && (isWon || current >= EndFloor))
+            {
                 RecordSuccess();
-        }
+                Completed = TotalAttempts >= TargetAttempts;
+                WaitingForSuccessContinue = true;
+                resultInputDelay = 15;
 
-        private void HandleStartPending()
-        {
-            if (startDelay-- > 0) return;
-
-            if (EditorBridge.Exists())
-            {
-                if (EditorBridge.IsPlayMode())
-                {
-                    if (!EditorBridge.SwitchToEditMode())
-                    {
-                        Main.SetStatus("Could not return to editor");
-                        Running = false;
-                        return;
-                    }
-
-                    startDelay = 2;
-                    return;
-                }
-
-                if (EditorBridge.PlayAt(StartFloor))
-                {
-                    CompleteStart();
-                    return;
-                }
+                Main.SetStatus(
+                    Completed
+                        ? "Completed"
+                        : "Success - press any key");
             }
-
-            if (GameBridge.Rewind(StartFloor))
-            {
-                CompleteStart();
-                return;
-            }
-
-            Main.SetStatus("Could not start from selected tile");
-            Running = false;
-        }
-
-        private void CompleteStart()
-        {
-            startPending = false;
-            ignoreFrames = 12;
-            attemptActive = false;
-            failLatched = false;
-            lastDeaths = GameBridge.Deaths();
         }
 
         private void RecordSuccess()
         {
             Successes++;
             CurrentStreak++;
-            if (CurrentStreak > BestStreak) BestStreak = CurrentStreak;
-
-            Completed = TotalAttempts >= TargetAttempts;
-            WaitingForContinue = true;
-            continueDelay = 10;
-            attemptActive = false;
-
-            FreezeManager.Freeze();
-
-            Main.SetStatus(
-                Completed
-                    ? "Completed - press any key"
-                    : "Success - press any key for next attempt");
+            if (CurrentStreak > BestStreak)
+                BestStreak = CurrentStreak;
         }
 
         private void RecordFail()
         {
             Failures++;
             CurrentStreak = 0;
-            Main.SetStatus("FAIL " + Failures + "/" + TotalAttempts);
-            attemptActive = false;
-
-            if (TotalAttempts >= TargetAttempts)
-            {
-                Running = false;
-                Completed = true;
-                return;
-            }
-
-            ScheduleStart(8);
         }
 
-        private void ScheduleStart(int delay)
+        private static bool ContainsState(string state, string token)
         {
-            startPending = true;
-            startDelay = delay;
+            return !string.IsNullOrEmpty(state) &&
+                   state.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+    }
+
+    internal static class BuiltInPractice
+    {
+        private static Type gcsType;
+        private static MemberInfo practiceMode;
+        private static MemberInfo checkpointNum;
+        private static MemberInfo practiceLength;
+        private static MemberInfo checkpointBeforePractice;
+        private static MemberInfo speedTrialMode;
+        private static bool resolved;
+
+        private static bool savedCheckpointCaptured;
+        private static int savedCheckpoint;
+
+        public static void Configure(int startFloor, int endFloor)
+        {
+            Resolve();
+            if (gcsType == null) return;
+
+            if (!savedCheckpointCaptured)
+            {
+                savedCheckpoint = ReadInt(checkpointNum, 0);
+                savedCheckpointCaptured = true;
+            }
+
+            Write(checkpointBeforePractice, savedCheckpoint);
+            Write(practiceMode, true);
+            Write(checkpointNum, startFloor);
+            Write(practiceLength, Math.Max(1, endFloor - startFloor));
+
+            // Built-in practice mode disables speed trial. Editor playback speed remains
+            // controlled by the editor itself.
+            Write(speedTrialMode, false);
+
+            GameBridge.SetCheckpointsUsed(1);
+        }
+
+        public static void Disable()
+        {
+            Resolve();
+            if (gcsType == null) return;
+
+            Write(practiceMode, false);
+
+            if (savedCheckpointCaptured)
+                Write(checkpointNum, savedCheckpoint);
+
+            savedCheckpointCaptured = false;
+            GameBridge.SetCheckpointsUsed(0);
+        }
+
+        private static void Resolve()
+        {
+            if (resolved) return;
+            resolved = true;
+
+            gcsType = ReflectionUtil.FindType("GCS");
+            if (gcsType == null) return;
+
+            const BindingFlags all = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
+            practiceMode = ReflectionUtil.FindMember(gcsType, "practiceMode", all);
+            checkpointNum = ReflectionUtil.FindMember(gcsType, "checkpointNum", all);
+            practiceLength = ReflectionUtil.FindMember(gcsType, "practiceLength", all);
+            checkpointBeforePractice = ReflectionUtil.FindMember(gcsType, "checkpointBeforePractice", all);
+            speedTrialMode = ReflectionUtil.FindMember(gcsType, "speedTrialMode", all);
+        }
+
+        private static int ReadInt(MemberInfo member, int fallback)
+        {
+            try
+            {
+                object value = ReflectionUtil.ReadMember(null, member);
+                return value == null ? fallback : Convert.ToInt32(value);
+            }
+            catch { return fallback; }
+        }
+
+        private static void Write(MemberInfo member, object value)
+        {
+            if (member == null) return;
+            try { ReflectionUtil.WriteMember(null, member, value); }
+            catch { }
         }
     }
 
@@ -454,9 +567,10 @@ namespace PracticeStats
         private static Type editorType;
         private static MemberInfo instanceMember;
         private static MemberInfo selectedFloorsMember;
+        private static MemberInfo floorsMember;
         private static MemberInfo playModeMember;
-        private static MethodInfo playMethod;
-        private static MethodInfo switchToEditMethod;
+        private static MethodInfo playNoArgs;
+        private static MethodInfo playWithArgs;
         private static bool resolved;
 
         public static bool Exists()
@@ -464,19 +578,15 @@ namespace PracticeStats
             return Instance() != null;
         }
 
-        public static object RawInstance()
-        {
-            return Instance();
-        }
-
         public static bool IsPlayMode()
         {
             object editor = Instance();
             if (editor == null) return false;
+
             try
             {
-                object raw = ReadMember(editor, playModeMember);
-                return raw is bool && (bool)raw;
+                object value = ReflectionUtil.ReadMember(editor, playModeMember);
+                return value is bool && (bool)value;
             }
             catch { return false; }
         }
@@ -492,8 +602,7 @@ namespace PracticeStats
 
             try
             {
-                object raw = ReadMember(editor, selectedFloorsMember);
-                IEnumerable floors = raw as IEnumerable;
+                IEnumerable floors = ReflectionUtil.ReadMember(editor, selectedFloorsMember) as IEnumerable;
                 if (floors == null) return false;
 
                 int min = int.MaxValue;
@@ -502,14 +611,18 @@ namespace PracticeStats
                 foreach (object floor in floors)
                 {
                     if (floor == null) continue;
+
                     int seq;
                     if (!TryGetSeqId(floor, out seq)) continue;
-                    if (seq < min) min = seq;
-                    if (seq > max) max = seq;
+
+                    min = Math.Min(min, seq);
+                    max = Math.Max(max, seq);
                     count++;
                 }
 
-                if (count == 0 || min == int.MaxValue || max == int.MinValue) return false;
+                if (count == 0 || min == int.MaxValue || max == int.MinValue)
+                    return false;
+
                 first = min;
                 last = max;
                 return true;
@@ -521,43 +634,50 @@ namespace PracticeStats
             }
         }
 
-        public static bool PlayAt(int floor)
+        public static bool PlayFromSingleFloor(int floorIndex)
         {
             object editor = Instance();
-            if (editor == null || playMethod == null) return false;
-            try
-            {
-                playMethod.Invoke(editor, new object[] { floor, false });
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Main.Log("Editor Play error: " + ex.Message);
-                return false;
-            }
-        }
+            if (editor == null) return false;
 
-        public static bool SwitchToEditMode()
-        {
-            object editor = Instance();
-            if (editor == null || switchToEditMethod == null) return false;
             try
             {
-                switchToEditMethod.Invoke(editor, new object[] { false });
-                return true;
+                if (playNoArgs != null)
+                {
+                    IList selected = ReflectionUtil.ReadMember(editor, selectedFloorsMember) as IList;
+                    IList floors = ReflectionUtil.ReadMember(editor, floorsMember) as IList;
+
+                    if (selected == null || floors == null || floorIndex < 0 || floorIndex >= floors.Count)
+                    {
+                        Main.Log("Could not prepare editor selection for playback.");
+                        return false;
+                    }
+
+                    selected.Clear();
+                    selected.Add(floors[floorIndex]);
+                    playNoArgs.Invoke(editor, null);
+                    return true;
+                }
+
+                if (playWithArgs != null)
+                {
+                    playWithArgs.Invoke(editor, new object[] { floorIndex, false });
+                    return true;
+                }
             }
             catch (Exception ex)
             {
-                Main.Log("SwitchToEditMode error: " + ex.Message);
-                return false;
+                Main.Log("Editor Play error: " + ex);
             }
+
+            return false;
         }
 
         private static object Instance()
         {
             Resolve();
             if (editorType == null || instanceMember == null) return null;
-            try { return ReadMember(null, instanceMember); }
+
+            try { return ReflectionUtil.ReadMember(null, instanceMember); }
             catch { return null; }
         }
 
@@ -565,64 +685,138 @@ namespace PracticeStats
         {
             if (resolved) return;
             resolved = true;
-            editorType = FindType("scnEditor");
+
+            editorType = ReflectionUtil.FindType("scnEditor");
             if (editorType == null) return;
 
-            const BindingFlags all = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance;
-            instanceMember = (MemberInfo)editorType.GetField("instance", all) ?? editorType.GetProperty("instance", all);
-            selectedFloorsMember = (MemberInfo)editorType.GetField("selectedFloors", all) ?? editorType.GetProperty("selectedFloors", all);
-            playModeMember = (MemberInfo)editorType.GetProperty("playMode", all) ?? editorType.GetField("playMode", all);
+            const BindingFlags all =
+                BindingFlags.Public | BindingFlags.NonPublic |
+                BindingFlags.Static | BindingFlags.Instance;
 
-            playMethod = editorType.GetMethods(all).FirstOrDefault(m =>
+            instanceMember = ReflectionUtil.FindMember(editorType, "instance", all);
+            selectedFloorsMember = ReflectionUtil.FindMember(editorType, "selectedFloors", all);
+            floorsMember = ReflectionUtil.FindMember(editorType, "floors", all);
+            playModeMember = ReflectionUtil.FindMember(editorType, "playMode", all);
+
+            MethodInfo[] methods = editorType.GetMethods(all);
+            playNoArgs = methods.FirstOrDefault(m => m.Name == "Play" && m.GetParameters().Length == 0);
+            playWithArgs = methods.FirstOrDefault(m =>
             {
                 if (m.Name != "Play") return false;
                 ParameterInfo[] p = m.GetParameters();
-                return p.Length == 2 && p[0].ParameterType == typeof(int) && p[1].ParameterType == typeof(bool);
-            });
-
-            switchToEditMethod = editorType.GetMethods(all).FirstOrDefault(m =>
-            {
-                if (m.Name != "SwitchToEditMode") return false;
-                ParameterInfo[] p = m.GetParameters();
-                return p.Length == 1 && p[0].ParameterType == typeof(bool);
+                return p.Length == 2 &&
+                       p[0].ParameterType == typeof(int) &&
+                       p[1].ParameterType == typeof(bool);
             });
         }
 
         private static bool TryGetSeqId(object floor, out int seq)
         {
             seq = -1;
-            Type t = floor.GetType();
-            const BindingFlags all = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance;
-            MemberInfo m = (MemberInfo)t.GetField("seqID", all) ?? t.GetProperty("seqID", all);
-            if (m == null) return false;
-            object raw = ReadMember(floor, m);
-            if (raw == null) return false;
-            seq = Convert.ToInt32(raw);
-            return true;
-        }
+            if (floor == null) return false;
 
-        private static Type FindType(string name)
-        {
-            foreach (Assembly a in AppDomain.CurrentDomain.GetAssemblies())
+            const BindingFlags all =
+                BindingFlags.Public | BindingFlags.NonPublic |
+                BindingFlags.Static | BindingFlags.Instance;
+
+            MemberInfo member = ReflectionUtil.FindMember(floor.GetType(), "seqID", all);
+            if (member == null) return false;
+
+            try
             {
-                try
-                {
-                    Type t = a.GetType(name, false);
-                    if (t != null) return t;
-                }
-                catch { }
+                object value = ReflectionUtil.ReadMember(floor, member);
+                if (value == null) return false;
+                seq = Convert.ToInt32(value);
+                return true;
             }
-            return null;
+            catch { return false; }
+        }
+    }
+
+    internal static class CustomLevelBridge
+    {
+        private static Type adoBaseType;
+        private static MemberInfo customLevelMember;
+        private static bool resolved;
+
+        public static bool Restart(int startFloor)
+        {
+            Resolve();
+
+            object customLevel = CustomLevel();
+            if (customLevel == null) return false;
+
+            try
+            {
+                Type t = customLevel.GetType();
+                const BindingFlags all =
+                    BindingFlags.Public | BindingFlags.NonPublic |
+                    BindingFlags.Instance;
+
+                MethodInfo reset = t.GetMethods(all).FirstOrDefault(m =>
+                {
+                    if (m.Name != "ResetScene") return false;
+                    ParameterInfo[] p = m.GetParameters();
+                    return p.Length == 1 && p[0].ParameterType == typeof(bool);
+                });
+
+                MethodInfo play2 = t.GetMethods(all).FirstOrDefault(m =>
+                {
+                    if (m.Name != "Play") return false;
+                    ParameterInfo[] p = m.GetParameters();
+                    return p.Length == 2 &&
+                           p[0].ParameterType == typeof(int) &&
+                           p[1].ParameterType == typeof(bool);
+                });
+
+                MethodInfo play1 = t.GetMethods(all).FirstOrDefault(m =>
+                {
+                    if (m.Name != "Play") return false;
+                    ParameterInfo[] p = m.GetParameters();
+                    return p.Length == 1 && p[0].ParameterType == typeof(int);
+                });
+
+                if (reset == null || (play2 == null && play1 == null))
+                    return false;
+
+                reset.Invoke(customLevel, new object[] { true });
+
+                if (play2 != null)
+                    play2.Invoke(customLevel, new object[] { startFloor, true });
+                else
+                    play1.Invoke(customLevel, new object[] { startFloor });
+
+                GameBridge.SetTransitioningLevel(false);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Main.Log("Custom level restart error: " + ex);
+                return false;
+            }
         }
 
-        private static object ReadMember(object instance, MemberInfo member)
+        private static object CustomLevel()
         {
-            if (member == null) return null;
-            FieldInfo f = member as FieldInfo;
-            if (f != null) return f.GetValue(instance);
-            PropertyInfo p = member as PropertyInfo;
-            if (p != null) return p.GetValue(instance, null);
-            return null;
+            Resolve();
+            if (adoBaseType == null || customLevelMember == null) return null;
+
+            try { return ReflectionUtil.ReadMember(null, customLevelMember); }
+            catch { return null; }
+        }
+
+        private static void Resolve()
+        {
+            if (resolved) return;
+            resolved = true;
+
+            adoBaseType = ReflectionUtil.FindType("ADOBase");
+            if (adoBaseType == null) return;
+
+            const BindingFlags all =
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
+
+            customLevelMember = ReflectionUtil.FindMember(adoBaseType, "customLevel", all);
         }
     }
 
@@ -632,25 +826,28 @@ namespace PracticeStats
         private static MemberInfo instanceMember;
         private static MemberInfo seqMember;
         private static MemberInfo deathsMember;
-        private static MethodInfo rewindMethod;
-        private static MethodInfo scrubMethod;
-        private static MemberInfo failedMember;
         private static MemberInfo stateMember;
+        private static MemberInfo checkpointsUsedMember;
+        private static MemberInfo transitioningLevelMember;
+        private static bool resolved;
 
         public static object Controller()
         {
             Resolve();
             if (controllerType == null || instanceMember == null) return null;
-            try { return ReadMember(null, instanceMember); } catch { return null; }
+
+            try { return ReflectionUtil.ReadMember(null, instanceMember); }
+            catch { return null; }
         }
 
         public static int CurrentFloor()
         {
-            object c = Controller();
-            if (c == null || seqMember == null) return -1;
+            object controller = Controller();
+            if (controller == null || seqMember == null) return -1;
+
             try
             {
-                object value = ReadMember(c, seqMember);
+                object value = ReflectionUtil.ReadMember(controller, seqMember);
                 return value == null ? -1 : Convert.ToInt32(value);
             }
             catch { return -1; }
@@ -660,187 +857,83 @@ namespace PracticeStats
         {
             Resolve();
             if (deathsMember == null) return -1;
+
             try
             {
-                object value = ReadMember(null, deathsMember);
+                object target = IsStatic(deathsMember) ? null : Controller();
+                object value = ReflectionUtil.ReadMember(target, deathsMember);
                 return value == null ? -1 : Convert.ToInt32(value);
             }
             catch { return -1; }
         }
 
-        public static bool IsFailed()
+        public static string StateName()
         {
-            object c = Controller();
-            if (c == null) return false;
+            object controller = Controller();
+            if (controller == null || stateMember == null) return "";
+
             try
             {
-                if (failedMember != null)
-                {
-                    object raw = ReadMember(c, failedMember);
-                    if (raw is bool) return (bool)raw;
-                }
-                if (stateMember != null)
-                {
-                    object raw = ReadMember(c, stateMember);
-                    string s = raw == null ? null : raw.ToString();
-                    return s != null && s.IndexOf("fail", StringComparison.OrdinalIgnoreCase) >= 0;
-                }
+                object value = ReflectionUtil.ReadMember(controller, stateMember);
+                return value == null ? "" : value.ToString();
             }
-            catch { }
-            return false;
+            catch { return ""; }
         }
 
-        public static bool Rewind(int floor)
+        public static void SetCheckpointsUsed(int value)
         {
-            object c = Controller();
-            if (c == null) return false;
-            try
-            {
-                if (rewindMethod != null)
-                {
-                    rewindMethod.Invoke(c, new object[] { floor });
-                    return true;
-                }
-                if (scrubMethod != null)
-                {
-                    scrubMethod.Invoke(c, new object[] { floor, false });
-                    return true;
-                }
-            }
-            catch (Exception ex)
-            {
-                Main.Log("Rewind error: " + ex.Message);
-            }
-            return false;
+            object controller = Controller();
+            if (controller == null || checkpointsUsedMember == null) return;
+
+            try { ReflectionUtil.WriteMember(controller, checkpointsUsedMember, value); }
+            catch { }
+        }
+
+        public static void SetTransitioningLevel(bool value)
+        {
+            object controller = Controller();
+            if (controller == null || transitioningLevelMember == null) return;
+
+            try { ReflectionUtil.WriteMember(controller, transitioningLevelMember, value); }
+            catch { }
         }
 
         private static void Resolve()
         {
-            if (controllerType != null) return;
-            controllerType = FindType("scrController");
+            if (resolved) return;
+            resolved = true;
+
+            controllerType = ReflectionUtil.FindType("scrController");
             if (controllerType == null) return;
-            const BindingFlags all = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance;
-            instanceMember = (MemberInfo)controllerType.GetProperty("instance", all) ?? controllerType.GetField("instance", all);
-            seqMember = (MemberInfo)controllerType.GetField("currentSeqID", all) ?? controllerType.GetProperty("currentSeqID", all);
-            deathsMember = (MemberInfo)controllerType.GetField("deaths", all) ?? controllerType.GetProperty("deaths", all);
-            failedMember = FindMember(controllerType, new[] { "failed", "isFailed", "hasFailed", "gameFailed", "isGameOver", "fail" }, all);
-            stateMember = FindMember(controllerType, new[] { "state", "currentState", "gameState", "playerState" }, all);
-            rewindMethod = controllerType.GetMethods(all).FirstOrDefault(m => m.Name == "Start_Rewind" && m.GetParameters().Length == 1 && m.GetParameters()[0].ParameterType == typeof(int));
-            scrubMethod = controllerType.GetMethods(all).FirstOrDefault(m => m.Name == "Scrub" && m.GetParameters().Length == 2 && m.GetParameters()[0].ParameterType == typeof(int));
+
+            const BindingFlags all =
+                BindingFlags.Public | BindingFlags.NonPublic |
+                BindingFlags.Static | BindingFlags.Instance;
+
+            instanceMember = ReflectionUtil.FindMember(controllerType, "instance", all);
+            seqMember = ReflectionUtil.FindMember(controllerType, "currentSeqID", all);
+            deathsMember = ReflectionUtil.FindMember(controllerType, "deaths", all);
+            checkpointsUsedMember = ReflectionUtil.FindMember(controllerType, "checkpointsUsed", all);
+            transitioningLevelMember = ReflectionUtil.FindMember(controllerType, "transitioningLevel", all);
+
+            stateMember =
+                ReflectionUtil.FindMember(controllerType, "state", all) ??
+                ReflectionUtil.FindMember(controllerType, "currentState", all);
         }
 
-        private static Type FindType(string name)
+        private static bool IsStatic(MemberInfo member)
         {
-            foreach (Assembly a in AppDomain.CurrentDomain.GetAssemblies())
+            FieldInfo field = member as FieldInfo;
+            if (field != null) return field.IsStatic;
+
+            PropertyInfo property = member as PropertyInfo;
+            if (property != null)
             {
-                try
-                {
-                    Type t = a.GetType(name, false);
-                    if (t != null) return t;
-                }
-                catch { }
-            }
-            return null;
-        }
-
-        private static MemberInfo FindMember(Type t, IEnumerable<string> names, BindingFlags flags)
-        {
-            foreach (string n in names)
-            {
-                MemberInfo m = (MemberInfo)t.GetField(n, flags) ?? t.GetProperty(n, flags);
-                if (m != null) return m;
-            }
-            return null;
-        }
-
-        private static object ReadMember(object instance, MemberInfo member)
-        {
-            if (member == null) return null;
-            FieldInfo f = member as FieldInfo;
-            if (f != null) return f.GetValue(instance);
-            PropertyInfo p = member as PropertyInfo;
-            if (p != null) return p.GetValue(instance, null);
-            return null;
-        }
-    }
-
-    internal static class FreezeManager
-    {
-        private static Type timeType;
-        private static PropertyInfo timeScaleProperty;
-        private static Type audioListenerType;
-        private static PropertyInfo audioPauseProperty;
-        private static bool frozen;
-        private static float previousTimeScale = 1f;
-        private static bool previousAudioPause;
-
-        public static void Freeze()
-        {
-            if (frozen) return;
-            Resolve();
-
-            try
-            {
-                if (timeScaleProperty != null)
-                {
-                    object raw = timeScaleProperty.GetValue(null, null);
-                    if (raw != null) previousTimeScale = Convert.ToSingle(raw);
-                    timeScaleProperty.SetValue(null, 0f, null);
-                }
-            }
-            catch { }
-
-            try
-            {
-                if (audioPauseProperty != null)
-                {
-                    object raw = audioPauseProperty.GetValue(null, null);
-                    if (raw is bool) previousAudioPause = (bool)raw;
-                    audioPauseProperty.SetValue(null, true, null);
-                }
-            }
-            catch { }
-
-            frozen = true;
-        }
-
-        public static void Unfreeze()
-        {
-            if (!frozen) return;
-            Resolve();
-
-            try
-            {
-                if (timeScaleProperty != null)
-                    timeScaleProperty.SetValue(null, previousTimeScale <= 0f ? 1f : previousTimeScale, null);
-            }
-            catch { }
-
-            try
-            {
-                if (audioPauseProperty != null)
-                    audioPauseProperty.SetValue(null, previousAudioPause, null);
-            }
-            catch { }
-
-            frozen = false;
-        }
-
-        private static void Resolve()
-        {
-            if (timeType == null)
-            {
-                timeType = Type.GetType("UnityEngine.Time, UnityEngine.CoreModule", false);
-                if (timeType != null)
-                    timeScaleProperty = timeType.GetProperty("timeScale", BindingFlags.Public | BindingFlags.Static);
+                MethodInfo getter = property.GetGetMethod(true);
+                return getter != null && getter.IsStatic;
             }
 
-            if (audioListenerType == null)
-            {
-                audioListenerType = Type.GetType("UnityEngine.AudioListener, UnityEngine.AudioModule", false);
-                if (audioListenerType != null)
-                    audioPauseProperty = audioListenerType.GetProperty("pause", BindingFlags.Public | BindingFlags.Static);
-            }
+            return false;
         }
     }
 
@@ -871,20 +964,17 @@ namespace PracticeStats
         public static void Hide()
         {
             if (rootObject == null || setActiveMethod == null) return;
-            try
-            {
-                setActiveMethod.Invoke(rootObject, new object[] { false });
-            }
-            catch
-            {
-                ResetReferences();
-            }
+
+            try { setActiveMethod.Invoke(rootObject, new object[] { false }); }
+            catch { ResetReferences(); }
         }
 
         private static bool EnsureCreated()
         {
-            if (rootObject != null && textComponent != null && setActiveMethod != null && textProperty != null)
+            if (rootObject != null && textComponent != null &&
+                setActiveMethod != null && textProperty != null)
                 return true;
+
             if (creationFailed) return false;
 
             try
@@ -897,23 +987,24 @@ namespace PracticeStats
                 Type textType = Type.GetType("UnityEngine.UI.Text, UnityEngine.UI", false);
                 Type fontType = Type.GetType("UnityEngine.Font, UnityEngine.TextRenderingModule", false);
 
-                if (gameObjectType == null || rectTransformType == null || transformType == null ||
-                    vector2Type == null || canvasType == null || textType == null)
+                if (gameObjectType == null || rectTransformType == null ||
+                    transformType == null || vector2Type == null ||
+                    canvasType == null || textType == null)
                 {
                     creationFailed = true;
-                    Main.Log("Overlay UI types were not found.");
                     return false;
                 }
 
-                ConstructorInfo gameObjectCtor = gameObjectType.GetConstructor(new[] { typeof(string), typeof(Type[]) });
-                if (gameObjectCtor == null)
+                ConstructorInfo goCtor = gameObjectType.GetConstructor(
+                    new[] { typeof(string), typeof(Type[]) });
+
+                if (goCtor == null)
                 {
                     creationFailed = true;
-                    Main.Log("GameObject(string, Type[]) constructor was not found.");
                     return false;
                 }
 
-                rootObject = gameObjectCtor.Invoke(new object[]
+                rootObject = goCtor.Invoke(new object[]
                 {
                     "PracticeStatsOverlay",
                     new Type[] { rectTransformType, canvasType }
@@ -941,20 +1032,18 @@ namespace PracticeStats
                     throw new MissingMethodException("Required GameObject API was not found.");
 
                 object canvas = getComponent.Invoke(rootObject, new object[] { canvasType });
-                if (canvas == null) throw new InvalidOperationException("Canvas could not be created.");
-
-                PropertyInfo renderModeProperty = canvasType.GetProperty("renderMode", BindingFlags.Public | BindingFlags.Instance);
-                if (renderModeProperty != null)
+                PropertyInfo renderMode = canvasType.GetProperty("renderMode", BindingFlags.Public | BindingFlags.Instance);
+                if (renderMode != null)
                 {
-                    object overlayMode = Enum.Parse(renderModeProperty.PropertyType, "ScreenSpaceOverlay", true);
-                    renderModeProperty.SetValue(canvas, overlayMode, null);
+                    object mode = Enum.Parse(renderMode.PropertyType, "ScreenSpaceOverlay", true);
+                    renderMode.SetValue(canvas, mode, null);
                 }
 
-                PropertyInfo sortingOrderProperty = canvasType.GetProperty("sortingOrder", BindingFlags.Public | BindingFlags.Instance);
-                if (sortingOrderProperty != null)
-                    sortingOrderProperty.SetValue(canvas, 5000, null);
+                PropertyInfo sortingOrder = canvasType.GetProperty("sortingOrder", BindingFlags.Public | BindingFlags.Instance);
+                if (sortingOrder != null)
+                    sortingOrder.SetValue(canvas, 5000, null);
 
-                object textObject = gameObjectCtor.Invoke(new object[]
+                object textObject = goCtor.Invoke(new object[]
                 {
                     "PracticeStatsText",
                     new Type[] { rectTransformType, textType }
@@ -968,29 +1057,38 @@ namespace PracticeStats
                     {
                         if (m.Name != "SetParent") return false;
                         ParameterInfo[] p = m.GetParameters();
-                        return p.Length == 2 && p[0].ParameterType == transformType && p[1].ParameterType == typeof(bool);
+                        return p.Length == 2 &&
+                               p[0].ParameterType == transformType &&
+                               p[1].ParameterType == typeof(bool);
                     });
 
-                if (setParent == null) throw new MissingMethodException("Transform.SetParent was not found.");
+                if (setParent == null)
+                    throw new MissingMethodException("Transform.SetParent was not found.");
+
                 setParent.Invoke(childTransform, new object[] { rootTransform, false });
 
-                object rectTransform = getComponent.Invoke(textObject, new object[] { rectTransformType });
+                object rect = getComponent.Invoke(textObject, new object[] { rectTransformType });
                 textComponent = getComponent.Invoke(textObject, new object[] { textType });
-                if (rectTransform == null || textComponent == null)
-                    throw new InvalidOperationException("Overlay text components could not be created.");
 
-                ConstructorInfo vector2Ctor = vector2Type.GetConstructor(new[] { typeof(float), typeof(float) });
-                if (vector2Ctor == null) throw new MissingMethodException("Vector2 constructor was not found.");
+                if (rect == null || textComponent == null)
+                    throw new InvalidOperationException("Overlay UI components could not be created.");
 
-                object topRight = vector2Ctor.Invoke(new object[] { 1f, 1f });
-                object position = vector2Ctor.Invoke(new object[] { -24f, -78f });
-                object size = vector2Ctor.Invoke(new object[] { 330f, 190f });
+                ConstructorInfo v2Ctor = vector2Type.GetConstructor(
+                    new[] { typeof(float), typeof(float) });
 
-                SetProperty(rectTransform, "anchorMin", topRight);
-                SetProperty(rectTransform, "anchorMax", topRight);
-                SetProperty(rectTransform, "pivot", topRight);
-                SetProperty(rectTransform, "anchoredPosition", position);
-                SetProperty(rectTransform, "sizeDelta", size);
+                if (v2Ctor == null)
+                    throw new MissingMethodException("Vector2 constructor was not found.");
+
+                object topRight = v2Ctor.Invoke(new object[] { 1f, 1f });
+                // Slightly lower than v0.3.0.
+                object position = v2Ctor.Invoke(new object[] { -24f, -125f });
+                object size = v2Ctor.Invoke(new object[] { 340f, 200f });
+
+                SetProperty(rect, "anchorMin", topRight);
+                SetProperty(rect, "anchorMax", topRight);
+                SetProperty(rect, "pivot", topRight);
+                SetProperty(rect, "anchoredPosition", position);
+                SetProperty(rect, "sizeDelta", size);
 
                 textProperty = textType.GetProperty("text", BindingFlags.Public | BindingFlags.Instance);
                 SetProperty(textComponent, "fontSize", 22);
@@ -1005,18 +1103,20 @@ namespace PracticeStats
                         {
                             if (m.Name != "CreateDynamicFontFromOSFont") return false;
                             ParameterInfo[] p = m.GetParameters();
-                            return p.Length == 2 && p[0].ParameterType == typeof(string) && p[1].ParameterType == typeof(int);
+                            return p.Length == 2 &&
+                                   p[0].ParameterType == typeof(string) &&
+                                   p[1].ParameterType == typeof(int);
                         });
 
                     if (createFont != null)
                     {
                         object font = createFont.Invoke(null, new object[] { "Arial", 22 });
-                        if (font != null) SetProperty(textComponent, "font", font);
+                        if (font != null)
+                            SetProperty(textComponent, "font", font);
                     }
                 }
 
                 setActiveMethod.Invoke(rootObject, new object[] { false });
-                Main.Log("Runtime overlay created.");
                 return textProperty != null;
             }
             catch (Exception ex)
@@ -1031,17 +1131,25 @@ namespace PracticeStats
         private static void SetProperty(object target, string name, object value)
         {
             if (target == null) return;
-            PropertyInfo p = target.GetType().GetProperty(name, BindingFlags.Public | BindingFlags.Instance);
-            if (p != null && p.CanWrite) p.SetValue(target, value, null);
+            PropertyInfo property = target.GetType().GetProperty(
+                name, BindingFlags.Public | BindingFlags.Instance);
+
+            if (property != null && property.CanWrite)
+                property.SetValue(target, value, null);
         }
 
         private static void SetEnumProperty(object target, string name, string enumName)
         {
             if (target == null) return;
-            PropertyInfo p = target.GetType().GetProperty(name, BindingFlags.Public | BindingFlags.Instance);
-            if (p == null || !p.CanWrite || !p.PropertyType.IsEnum) return;
-            object value = Enum.Parse(p.PropertyType, enumName, true);
-            p.SetValue(target, value, null);
+
+            PropertyInfo property = target.GetType().GetProperty(
+                name, BindingFlags.Public | BindingFlags.Instance);
+
+            if (property == null || !property.CanWrite || !property.PropertyType.IsEnum)
+                return;
+
+            object value = Enum.Parse(property.PropertyType, enumName, true);
+            property.SetValue(target, value, null);
         }
 
         private static void ResetReferences()
@@ -1059,13 +1167,16 @@ namespace PracticeStats
         private static Type keyCodeType;
         private static MethodInfo getKeyDown;
         private static PropertyInfo anyKeyDown;
+        private static bool resolved;
 
         public static bool GetKeyDown(string key)
         {
             Resolve();
+
             try
             {
                 if (getKeyDown == null || keyCodeType == null) return false;
+
                 object code = Enum.Parse(keyCodeType, key, true);
                 object result = getKeyDown.Invoke(null, new[] { code });
                 return result is bool && (bool)result;
@@ -1076,6 +1187,7 @@ namespace PracticeStats
         public static bool AnyKeyDown()
         {
             Resolve();
+
             try
             {
                 if (anyKeyDown == null) return false;
@@ -1087,16 +1199,25 @@ namespace PracticeStats
 
         private static void Resolve()
         {
-            if (inputType != null) return;
+            if (resolved) return;
+            resolved = true;
 
             inputType = Type.GetType("UnityEngine.Input, UnityEngine.InputLegacyModule", false);
             keyCodeType = Type.GetType("UnityEngine.KeyCode, UnityEngine.CoreModule", false);
 
-            if (inputType != null)
+            if (inputType == null) return;
+
+            anyKeyDown = inputType.GetProperty(
+                "anyKeyDown", BindingFlags.Public | BindingFlags.Static);
+
+            if (keyCodeType != null)
             {
-                anyKeyDown = inputType.GetProperty("anyKeyDown", BindingFlags.Public | BindingFlags.Static);
-                if (keyCodeType != null)
-                    getKeyDown = inputType.GetMethod("GetKeyDown", BindingFlags.Public | BindingFlags.Static, null, new[] { keyCodeType }, null);
+                getKeyDown = inputType.GetMethod(
+                    "GetKeyDown",
+                    BindingFlags.Public | BindingFlags.Static,
+                    null,
+                    new[] { keyCodeType },
+                    null);
             }
         }
     }
@@ -1115,13 +1236,15 @@ namespace PracticeStats
         public static void Label(string text)
         {
             Resolve();
-            if (label != null) label.Invoke(null, new object[] { text, noOptions });
+            if (label != null)
+                label.Invoke(null, new object[] { text, noOptions });
         }
 
         public static string TextField(string text)
         {
             Resolve();
             if (textField == null) return text;
+
             object result = textField.Invoke(null, new object[] { text, noOptions });
             return result as string ?? text;
         }
@@ -1130,6 +1253,7 @@ namespace PracticeStats
         {
             Resolve();
             if (button == null) return false;
+
             object result = button.Invoke(null, new object[] { text, noOptions });
             return result is bool && (bool)result;
         }
@@ -1137,31 +1261,132 @@ namespace PracticeStats
         public static void Space(float pixels)
         {
             Resolve();
-            if (space != null) space.Invoke(null, new object[] { pixels });
+            if (space != null)
+                space.Invoke(null, new object[] { pixels });
         }
 
         private static void Resolve()
         {
             if (resolved) return;
             resolved = true;
+
             layoutType = Type.GetType("UnityEngine.GUILayout, UnityEngine.IMGUIModule", false);
             optionType = Type.GetType("UnityEngine.GUILayoutOption, UnityEngine.IMGUIModule", false);
+
             if (layoutType == null || optionType == null) return;
+
             noOptions = Array.CreateInstance(optionType, 0);
             MethodInfo[] methods = layoutType.GetMethods(BindingFlags.Public | BindingFlags.Static);
-            label = methods.FirstOrDefault(m => Match(m, "Label", typeof(string), optionType.MakeArrayType()));
-            textField = methods.FirstOrDefault(m => Match(m, "TextField", typeof(string), optionType.MakeArrayType()) && m.ReturnType == typeof(string));
-            button = methods.FirstOrDefault(m => Match(m, "Button", typeof(string), optionType.MakeArrayType()) && m.ReturnType == typeof(bool));
-            space = methods.FirstOrDefault(m => Match(m, "Space", typeof(float)));
+
+            label = methods.FirstOrDefault(m =>
+                Match(m, "Label", typeof(string), optionType.MakeArrayType()));
+
+            textField = methods.FirstOrDefault(m =>
+                Match(m, "TextField", typeof(string), optionType.MakeArrayType()) &&
+                m.ReturnType == typeof(string));
+
+            button = methods.FirstOrDefault(m =>
+                Match(m, "Button", typeof(string), optionType.MakeArrayType()) &&
+                m.ReturnType == typeof(bool));
+
+            space = methods.FirstOrDefault(m =>
+                Match(m, "Space", typeof(float)));
         }
 
-        private static bool Match(MethodInfo m, string name, params Type[] types)
+        private static bool Match(MethodInfo method, string name, params Type[] types)
         {
-            if (m.Name != name) return false;
-            ParameterInfo[] p = m.GetParameters();
-            if (p.Length != types.Length) return false;
-            for (int i = 0; i < p.Length; i++) if (p[i].ParameterType != types[i]) return false;
+            if (method.Name != name) return false;
+
+            ParameterInfo[] parameters = method.GetParameters();
+            if (parameters.Length != types.Length) return false;
+
+            for (int i = 0; i < parameters.Length; i++)
+            {
+                if (parameters[i].ParameterType != types[i])
+                    return false;
+            }
+
             return true;
+        }
+    }
+
+    internal static class ReflectionUtil
+    {
+        public static Type FindType(string name)
+        {
+            foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try
+                {
+                    Type type = assembly.GetType(name, false);
+                    if (type != null) return type;
+                }
+                catch { }
+            }
+
+            return null;
+        }
+
+        public static MemberInfo FindMember(Type type, string name, BindingFlags flags)
+        {
+            if (type == null) return null;
+
+            Type current = type;
+            while (current != null)
+            {
+                FieldInfo field = current.GetField(name, flags | BindingFlags.DeclaredOnly);
+                if (field != null) return field;
+
+                PropertyInfo property = current.GetProperty(name, flags | BindingFlags.DeclaredOnly);
+                if (property != null) return property;
+
+                current = current.BaseType;
+            }
+
+            return null;
+        }
+
+        public static object ReadMember(object instance, MemberInfo member)
+        {
+            if (member == null) return null;
+
+            FieldInfo field = member as FieldInfo;
+            if (field != null)
+                return field.GetValue(instance);
+
+            PropertyInfo property = member as PropertyInfo;
+            if (property != null)
+                return property.GetValue(instance, null);
+
+            return null;
+        }
+
+        public static void WriteMember(object instance, MemberInfo member, object value)
+        {
+            if (member == null) return;
+
+            FieldInfo field = member as FieldInfo;
+            if (field != null)
+            {
+                object converted = ConvertFor(value, field.FieldType);
+                field.SetValue(instance, converted);
+                return;
+            }
+
+            PropertyInfo property = member as PropertyInfo;
+            if (property != null && property.CanWrite)
+            {
+                object converted = ConvertFor(value, property.PropertyType);
+                property.SetValue(instance, converted, null);
+            }
+        }
+
+        private static object ConvertFor(object value, Type target)
+        {
+            if (value == null) return null;
+            if (target.IsInstanceOfType(value)) return value;
+            if (target.IsEnum) return Enum.ToObject(target, value);
+            return Convert.ChangeType(value, target);
         }
     }
 }
