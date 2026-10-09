@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Reflection.Emit;
 using UnityModManagerNet;
 
 namespace PracticeStats
@@ -25,7 +26,7 @@ namespace PracticeStats
             modEntry.OnGUI = OnGUI;
             modEntry.OnSaveGUI = OnSaveGUI;
             modEntry.OnUnload = OnUnload;
-            Log("PracticeStats v0.2.0 loaded (ADOFAI 3.4.0 target).");
+            Log("PracticeStats v0.3.0 loaded (ADOFAI 3.4.0 target).");
             return true;
         }
 
@@ -49,6 +50,7 @@ namespace PracticeStats
             if (!enabled) return;
             try
             {
+                RuntimeOverlay.EnsureAttached();
                 SyncRangeFromEditor(false);
 
                 if (UnityBridge.GetKeyDown("F8")) TogglePractice();
@@ -59,7 +61,8 @@ namespace PracticeStats
                 }
 
                 session.Tick();
-                if (session.Completed) status = "Completed";
+                if (session.Completed && !session.WaitingForContinue)
+                    status = "Completed";
             }
             catch (Exception ex)
             {
@@ -78,9 +81,7 @@ namespace PracticeStats
                 RGui.Space(6f);
 
                 if (hasEditorRange)
-                {
                     RGui.Label("Selected range: " + session.StartFloor + " -> " + session.EndFloor + " (" + selectedCount + " tiles selected)");
-                }
                 else
                 {
                     RGui.Label("Selected range: none");
@@ -137,7 +138,6 @@ namespace PracticeStats
             bool changed = !hasEditorRange || session.StartFloor != start || session.EndFloor != end;
             hasEditorRange = true;
             selectedCount = count;
-
             if (!changed) return;
 
             session.StartFloor = start;
@@ -185,6 +185,27 @@ namespace PracticeStats
             attemptsText = session.TargetAttempts.ToString();
         }
 
+        public static void DrawRuntimeOverlay()
+        {
+            if (!enabled || !session.Running) return;
+
+            int remaining = Math.Max(0, session.TargetAttempts - session.TotalAttempts);
+            string prompt = "";
+            if (session.WaitingForContinue)
+                prompt = session.Completed
+                    ? "\n\nCOMPLETE - press any key"
+                    : "\n\nSUCCESS - press any key for next attempt";
+
+            string text =
+                "PracticeStats\n" +
+                "Remaining: " + remaining + "\n" +
+                "Cleared: " + session.Successes + "\n" +
+                "Success rate: " + session.SuccessRate.ToString("0.00") + "%" +
+                prompt;
+
+            OverlayRenderer.Draw(text, session.WaitingForContinue);
+        }
+
         internal static void SetStatus(string text)
         {
             status = text;
@@ -208,6 +229,7 @@ namespace PracticeStats
         public int BestStreak { get; private set; }
         public bool Running { get; private set; }
         public bool Completed { get; private set; }
+        public bool WaitingForContinue { get; private set; }
         public int TotalAttempts { get { return Successes + Failures; } }
         public float SuccessRate { get { return TotalAttempts == 0 ? 0f : (Successes * 100f / TotalAttempts); } }
 
@@ -215,6 +237,7 @@ namespace PracticeStats
         private bool startPending;
         private int startDelay;
         private int ignoreFrames;
+        private int continueDelay;
         private int lastDeaths = -1;
         private bool failLatched;
 
@@ -229,9 +252,11 @@ namespace PracticeStats
 
         public void Start()
         {
+            FreezeManager.Unfreeze();
             if (TotalAttempts >= TargetAttempts) ResetStats();
             Running = true;
             Completed = false;
+            WaitingForContinue = false;
             attemptActive = false;
             failLatched = false;
             lastDeaths = GameBridge.Deaths();
@@ -240,7 +265,9 @@ namespace PracticeStats
 
         public void Stop()
         {
+            FreezeManager.Unfreeze();
             Running = false;
+            WaitingForContinue = false;
             attemptActive = false;
             startPending = false;
             failLatched = false;
@@ -259,30 +286,36 @@ namespace PracticeStats
         public void Tick()
         {
             if (!Running) return;
-            if (TotalAttempts >= TargetAttempts)
+
+            if (WaitingForContinue)
             {
-                Running = false;
-                Completed = true;
-                attemptActive = false;
+                if (continueDelay > 0)
+                {
+                    continueDelay--;
+                    return;
+                }
+
+                if (!UnityBridge.AnyKeyDown()) return;
+
+                FreezeManager.Unfreeze();
+                WaitingForContinue = false;
+
+                if (Completed || TotalAttempts >= TargetAttempts)
+                {
+                    Running = false;
+                    Completed = true;
+                    Main.SetStatus("Completed");
+                    return;
+                }
+
+                Main.SetStatus("Next attempt");
+                ScheduleStart(2);
                 return;
             }
 
             if (startPending)
             {
-                if (startDelay-- > 0) return;
-                startPending = false;
-
-                if (!GameBridge.StartAt(StartFloor))
-                {
-                    Main.SetStatus("Could not start from selected tile");
-                    Running = false;
-                    return;
-                }
-
-                ignoreFrames = 12;
-                attemptActive = false;
-                failLatched = false;
-                lastDeaths = GameBridge.Deaths();
+                HandleStartPending();
                 return;
             }
 
@@ -316,9 +349,52 @@ namespace PracticeStats
             }
 
             if (current >= EndFloor)
-            {
                 RecordSuccess();
+        }
+
+        private void HandleStartPending()
+        {
+            if (startDelay-- > 0) return;
+
+            if (EditorBridge.Exists())
+            {
+                if (EditorBridge.IsPlayMode())
+                {
+                    if (!EditorBridge.SwitchToEditMode())
+                    {
+                        Main.SetStatus("Could not return to editor");
+                        Running = false;
+                        return;
+                    }
+
+                    startDelay = 2;
+                    return;
+                }
+
+                if (EditorBridge.PlayAt(StartFloor))
+                {
+                    CompleteStart();
+                    return;
+                }
             }
+
+            if (GameBridge.Rewind(StartFloor))
+            {
+                CompleteStart();
+                return;
+            }
+
+            Main.SetStatus("Could not start from selected tile");
+            Running = false;
+        }
+
+        private void CompleteStart()
+        {
+            startPending = false;
+            ignoreFrames = 12;
+            attemptActive = false;
+            failLatched = false;
+            lastDeaths = GameBridge.Deaths();
         }
 
         private void RecordSuccess()
@@ -326,8 +402,18 @@ namespace PracticeStats
             Successes++;
             CurrentStreak++;
             if (CurrentStreak > BestStreak) BestStreak = CurrentStreak;
-            Main.SetStatus("SUCCESS " + Successes + "/" + TotalAttempts);
-            FinishAttempt();
+
+            Completed = TotalAttempts >= TargetAttempts;
+            WaitingForContinue = true;
+            continueDelay = 10;
+            attemptActive = false;
+
+            FreezeManager.Freeze();
+
+            Main.SetStatus(
+                Completed
+                    ? "Completed - press any key"
+                    : "Success - press any key for next attempt");
         }
 
         private void RecordFail()
@@ -335,18 +421,15 @@ namespace PracticeStats
             Failures++;
             CurrentStreak = 0;
             Main.SetStatus("FAIL " + Failures + "/" + TotalAttempts);
-            FinishAttempt();
-        }
-
-        private void FinishAttempt()
-        {
             attemptActive = false;
+
             if (TotalAttempts >= TargetAttempts)
             {
                 Running = false;
                 Completed = true;
                 return;
             }
+
             ScheduleStart(8);
         }
 
@@ -364,11 +447,17 @@ namespace PracticeStats
         private static MemberInfo selectedFloorsMember;
         private static MemberInfo playModeMember;
         private static MethodInfo playMethod;
+        private static MethodInfo switchToEditMethod;
         private static bool resolved;
 
         public static bool Exists()
         {
             return Instance() != null;
+        }
+
+        public static object RawInstance()
+        {
+            return Instance();
         }
 
         public static bool IsPlayMode()
@@ -439,6 +528,22 @@ namespace PracticeStats
             }
         }
 
+        public static bool SwitchToEditMode()
+        {
+            object editor = Instance();
+            if (editor == null || switchToEditMethod == null) return false;
+            try
+            {
+                switchToEditMethod.Invoke(editor, new object[] { false });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Main.Log("SwitchToEditMode error: " + ex.Message);
+                return false;
+            }
+        }
+
         private static object Instance()
         {
             Resolve();
@@ -458,11 +563,19 @@ namespace PracticeStats
             instanceMember = (MemberInfo)editorType.GetField("instance", all) ?? editorType.GetProperty("instance", all);
             selectedFloorsMember = (MemberInfo)editorType.GetField("selectedFloors", all) ?? editorType.GetProperty("selectedFloors", all);
             playModeMember = (MemberInfo)editorType.GetProperty("playMode", all) ?? editorType.GetField("playMode", all);
+
             playMethod = editorType.GetMethods(all).FirstOrDefault(m =>
             {
                 if (m.Name != "Play") return false;
                 ParameterInfo[] p = m.GetParameters();
                 return p.Length == 2 && p[0].ParameterType == typeof(int) && p[1].ParameterType == typeof(bool);
+            });
+
+            switchToEditMethod = editorType.GetMethods(all).FirstOrDefault(m =>
+            {
+                if (m.Name != "SwitchToEditMode") return false;
+                ParameterInfo[] p = m.GetParameters();
+                return p.Length == 1 && p[0].ParameterType == typeof(bool);
             });
         }
 
@@ -514,25 +627,6 @@ namespace PracticeStats
         private static MethodInfo scrubMethod;
         private static MemberInfo failedMember;
         private static MemberInfo stateMember;
-
-        public static bool StartAt(int floor)
-        {
-            // Important for deep editor tiles: start through scnEditor.Play first when we are
-            // coming from edit mode. This makes the editor initialize the selected section
-            // correctly before the controller is asked to rewind on later attempts.
-            if (EditorBridge.Exists() && (!EditorBridge.IsPlayMode() || Controller() == null))
-            {
-                if (EditorBridge.PlayAt(floor)) return true;
-            }
-
-            if (Rewind(floor)) return true;
-
-            // Fallback if the controller disappeared after a fail and the editor has already
-            // switched back to edit mode.
-            if (EditorBridge.Exists() && EditorBridge.PlayAt(floor)) return true;
-
-            return false;
-        }
 
         public static object Controller()
         {
@@ -587,7 +681,7 @@ namespace PracticeStats
             return false;
         }
 
-        private static bool Rewind(int floor)
+        public static bool Rewind(int floor)
         {
             object c = Controller();
             if (c == null) return false;
@@ -661,29 +755,273 @@ namespace PracticeStats
         }
     }
 
+    internal static class FreezeManager
+    {
+        private static Type timeType;
+        private static PropertyInfo timeScaleProperty;
+        private static Type audioListenerType;
+        private static PropertyInfo audioPauseProperty;
+        private static bool frozen;
+        private static float previousTimeScale = 1f;
+        private static bool previousAudioPause;
+
+        public static void Freeze()
+        {
+            if (frozen) return;
+            Resolve();
+
+            try
+            {
+                if (timeScaleProperty != null)
+                {
+                    object raw = timeScaleProperty.GetValue(null, null);
+                    if (raw != null) previousTimeScale = Convert.ToSingle(raw);
+                    timeScaleProperty.SetValue(null, 0f, null);
+                }
+            }
+            catch { }
+
+            try
+            {
+                if (audioPauseProperty != null)
+                {
+                    object raw = audioPauseProperty.GetValue(null, null);
+                    if (raw is bool) previousAudioPause = (bool)raw;
+                    audioPauseProperty.SetValue(null, true, null);
+                }
+            }
+            catch { }
+
+            frozen = true;
+        }
+
+        public static void Unfreeze()
+        {
+            if (!frozen) return;
+            Resolve();
+
+            try
+            {
+                if (timeScaleProperty != null)
+                    timeScaleProperty.SetValue(null, previousTimeScale <= 0f ? 1f : previousTimeScale, null);
+            }
+            catch { }
+
+            try
+            {
+                if (audioPauseProperty != null)
+                    audioPauseProperty.SetValue(null, previousAudioPause, null);
+            }
+            catch { }
+
+            frozen = false;
+        }
+
+        private static void Resolve()
+        {
+            if (timeType == null)
+            {
+                timeType = Type.GetType("UnityEngine.Time, UnityEngine.CoreModule", false);
+                if (timeType != null)
+                    timeScaleProperty = timeType.GetProperty("timeScale", BindingFlags.Public | BindingFlags.Static);
+            }
+
+            if (audioListenerType == null)
+            {
+                audioListenerType = Type.GetType("UnityEngine.AudioListener, UnityEngine.AudioModule", false);
+                if (audioListenerType != null)
+                    audioPauseProperty = audioListenerType.GetProperty("pause", BindingFlags.Public | BindingFlags.Static);
+            }
+        }
+    }
+
+    internal static class RuntimeOverlay
+    {
+        private static Type behaviourType;
+
+        public static void EnsureAttached()
+        {
+            try
+            {
+                object host = EditorBridge.RawInstance() ?? GameBridge.Controller();
+                if (host == null) return;
+
+                Type overlayType = GetOrCreateBehaviourType();
+                if (overlayType == null) return;
+
+                const BindingFlags all = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                PropertyInfo gameObjectProp = host.GetType().GetProperty("gameObject", all);
+                if (gameObjectProp == null) return;
+
+                object gameObject = gameObjectProp.GetValue(host, null);
+                if (gameObject == null) return;
+
+                MethodInfo getComponent = gameObject.GetType().GetMethod("GetComponent", all, null, new[] { typeof(Type) }, null);
+                MethodInfo addComponent = gameObject.GetType().GetMethod("AddComponent", all, null, new[] { typeof(Type) }, null);
+                if (addComponent == null) return;
+
+                if (getComponent != null)
+                {
+                    object existing = getComponent.Invoke(gameObject, new object[] { overlayType });
+                    if (existing != null) return;
+                }
+
+                addComponent.Invoke(gameObject, new object[] { overlayType });
+            }
+            catch (Exception ex)
+            {
+                Main.Log("Overlay attach error: " + ex.Message);
+            }
+        }
+
+        private static Type GetOrCreateBehaviourType()
+        {
+            if (behaviourType != null) return behaviourType;
+
+            try
+            {
+                Type monoBehaviour = Type.GetType("UnityEngine.MonoBehaviour, UnityEngine.CoreModule", false);
+                if (monoBehaviour == null) return null;
+
+                AssemblyName name = new AssemblyName("PracticeStats.RuntimeOverlay");
+                AssemblyBuilder assembly = AssemblyBuilder.DefineDynamicAssembly(name, AssemblyBuilderAccess.Run);
+                ModuleBuilder module = assembly.DefineDynamicModule("main");
+                TypeBuilder type = module.DefineType(
+                    "PracticeStatsRuntimeOverlayBehaviour",
+                    TypeAttributes.Public | TypeAttributes.Class,
+                    monoBehaviour);
+
+                MethodBuilder onGui = type.DefineMethod(
+                    "OnGUI",
+                    MethodAttributes.Public,
+                    typeof(void),
+                    Type.EmptyTypes);
+
+                ILGenerator il = onGui.GetILGenerator();
+                MethodInfo draw = typeof(Main).GetMethod("DrawRuntimeOverlay", BindingFlags.Public | BindingFlags.Static);
+                il.Emit(OpCodes.Call, draw);
+                il.Emit(OpCodes.Ret);
+
+                behaviourType = type.CreateTypeInfo().AsType();
+                return behaviourType;
+            }
+            catch (Exception ex)
+            {
+                Main.Log("Overlay type error: " + ex.Message);
+                return null;
+            }
+        }
+    }
+
+    internal static class OverlayRenderer
+    {
+        private static Type guiType;
+        private static Type rectType;
+        private static Type screenType;
+        private static MethodInfo boxMethod;
+        private static MethodInfo labelMethod;
+        private static ConstructorInfo rectCtor;
+        private static PropertyInfo screenWidth;
+        private static bool resolved;
+
+        public static void Draw(string text, bool waiting)
+        {
+            Resolve();
+            if (guiType == null || rectType == null || rectCtor == null || labelMethod == null) return;
+
+            try
+            {
+                int width = 1280;
+                if (screenWidth != null)
+                {
+                    object raw = screenWidth.GetValue(null, null);
+                    if (raw != null) width = Convert.ToInt32(raw);
+                }
+
+                float panelWidth = 260f;
+                float panelHeight = waiting ? 145f : 105f;
+                float x = Math.Max(10f, width - panelWidth - 24f);
+                float y = 78f;
+
+                object panelRect = rectCtor.Invoke(new object[] { x, y, panelWidth, panelHeight });
+                object textRect = rectCtor.Invoke(new object[] { x + 12f, y + 10f, panelWidth - 24f, panelHeight - 18f });
+
+                if (boxMethod != null)
+                    boxMethod.Invoke(null, new object[] { panelRect, "" });
+
+                labelMethod.Invoke(null, new object[] { textRect, text });
+            }
+            catch { }
+        }
+
+        private static void Resolve()
+        {
+            if (resolved) return;
+            resolved = true;
+
+            guiType = Type.GetType("UnityEngine.GUI, UnityEngine.IMGUIModule", false);
+            rectType = Type.GetType("UnityEngine.Rect, UnityEngine.CoreModule", false);
+            screenType = Type.GetType("UnityEngine.Screen, UnityEngine.CoreModule", false);
+
+            if (rectType != null)
+                rectCtor = rectType.GetConstructor(new[] { typeof(float), typeof(float), typeof(float), typeof(float) });
+
+            if (screenType != null)
+                screenWidth = screenType.GetProperty("width", BindingFlags.Public | BindingFlags.Static);
+
+            if (guiType != null && rectType != null)
+            {
+                boxMethod = guiType.GetMethod("Box", BindingFlags.Public | BindingFlags.Static, null, new[] { rectType, typeof(string) }, null);
+                labelMethod = guiType.GetMethod("Label", BindingFlags.Public | BindingFlags.Static, null, new[] { rectType, typeof(string) }, null);
+            }
+        }
+    }
+
     internal static class UnityBridge
     {
         private static Type inputType;
         private static Type keyCodeType;
         private static MethodInfo getKeyDown;
+        private static PropertyInfo anyKeyDown;
 
         public static bool GetKeyDown(string key)
         {
+            Resolve();
             try
             {
-                if (inputType == null)
-                {
-                    inputType = Type.GetType("UnityEngine.Input, UnityEngine.InputLegacyModule", false);
-                    keyCodeType = Type.GetType("UnityEngine.KeyCode, UnityEngine.CoreModule", false);
-                    if (inputType != null && keyCodeType != null)
-                        getKeyDown = inputType.GetMethod("GetKeyDown", BindingFlags.Public | BindingFlags.Static, null, new[] { keyCodeType }, null);
-                }
                 if (getKeyDown == null || keyCodeType == null) return false;
                 object code = Enum.Parse(keyCodeType, key, true);
                 object result = getKeyDown.Invoke(null, new[] { code });
                 return result is bool && (bool)result;
             }
             catch { return false; }
+        }
+
+        public static bool AnyKeyDown()
+        {
+            Resolve();
+            try
+            {
+                if (anyKeyDown == null) return false;
+                object result = anyKeyDown.GetValue(null, null);
+                return result is bool && (bool)result;
+            }
+            catch { return false; }
+        }
+
+        private static void Resolve()
+        {
+            if (inputType != null) return;
+
+            inputType = Type.GetType("UnityEngine.Input, UnityEngine.InputLegacyModule", false);
+            keyCodeType = Type.GetType("UnityEngine.KeyCode, UnityEngine.CoreModule", false);
+
+            if (inputType != null)
+            {
+                anyKeyDown = inputType.GetProperty("anyKeyDown", BindingFlags.Public | BindingFlags.Static);
+                if (keyCodeType != null)
+                    getKeyDown = inputType.GetMethod("GetKeyDown", BindingFlags.Public | BindingFlags.Static, null, new[] { keyCodeType }, null);
+            }
         }
     }
 
