@@ -25,7 +25,7 @@ namespace PracticeStats
             modEntry.OnGUI = OnGUI;
             modEntry.OnSaveGUI = OnSaveGUI;
             modEntry.OnUnload = OnUnload;
-            Log("PracticeStats v0.4.8 loaded (ADOFAI 3.4.0 target).");
+            Log("PracticeStats v0.4.9 loaded (ADOFAI 3.4.0 target).");
             return true;
         }
 
@@ -81,7 +81,7 @@ namespace PracticeStats
             {
                 SyncRangeFromEditor(false);
 
-                RGui.Label("PracticeStats v0.4.8 - ADOFAI 3.4.0");
+                RGui.Label("PracticeStats v0.4.9 - ADOFAI 3.4.0");
                 RGui.Label("Uses ADOFAI built-in practice mode");
                 RGui.Label("Range: editor Shift + Left Click selection");
                 RGui.Space(6f);
@@ -211,7 +211,7 @@ namespace PracticeStats
 
             if (session.Completed)
             {
-                prompt = "\n\nCOMPLETE - press any key to return to editor";
+                prompt = "\n\nCOMPLETE - press ESC to return to editor";
             }
             else if (session.WaitingForSuccessContinue)
             {
@@ -442,7 +442,7 @@ namespace PracticeStats
                 if (TotalAttempts >= TargetAttempts)
                 {
                     Completed = true;
-                    Main.SetStatus("Completed - press any key to return to editor");
+                    Main.SetStatus("Completed - press ESC to return to editor");
                 }
                 else
                 {
@@ -557,8 +557,9 @@ namespace PracticeStats
 
         private void TickComplete()
         {
-            // If ESC already returned to edit mode, finish immediately instead
-            // of waiting for another input that gameplay can no longer receive.
+            // COMPLETE is intentionally ESC-only. Other gameplay keys must do
+            // absolutely nothing so the final result cannot be dismissed by
+            // an accidental hit key.
             if (EditorBridge.Exists() && !EditorBridge.IsPlayMode())
             {
                 CompleteSession();
@@ -567,7 +568,7 @@ namespace PracticeStats
 
             if (!continueRequested)
             {
-                if (!GameBridge.AnyValidInputWasTriggered()) return;
+                if (!UnityBridge.GetKeyDown("Escape")) return;
 
                 continueRequested = true;
                 continueDelay = 2;
