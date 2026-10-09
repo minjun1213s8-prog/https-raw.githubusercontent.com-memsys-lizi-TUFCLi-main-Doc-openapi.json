@@ -25,7 +25,7 @@ namespace PracticeStats
             modEntry.OnGUI = OnGUI;
             modEntry.OnSaveGUI = OnSaveGUI;
             modEntry.OnUnload = OnUnload;
-            Log("PracticeStats 0.1.0v loaded (ADOFAI 3.4.0 target).");
+            Log("PracticeStats 0.1.1v loaded (ADOFAI 3.4.0 target).");
             return true;
         }
 
@@ -81,7 +81,7 @@ namespace PracticeStats
             {
                 SyncRangeFromEditor(false);
 
-                RGui.Label("PracticeStats 0.1.0v - ADOFAI 3.4.0");
+                RGui.Label("PracticeStats 0.1.1v - ADOFAI 3.4.0");
                 RGui.Label("Uses ADOFAI built-in practice mode");
                 RGui.Label("Range: editor Shift + Left Click selection");
                 RGui.Space(6f);
@@ -254,6 +254,7 @@ namespace PracticeStats
         public int EndFloor = 1;
         public int TargetAttempts = 100;
 
+        public int AttemptsStarted { get; private set; }
         public int Successes { get; private set; }
         public int Failures { get; private set; }
         public int CurrentStreak { get; private set; }
@@ -264,7 +265,7 @@ namespace PracticeStats
         public bool WaitingForSuccessContinue { get; private set; }
         public bool FailScreenActive { get; private set; }
 
-        public int TotalAttempts { get { return Successes + Failures; } }
+        public int TotalAttempts { get { return AttemptsStarted; } }
         public float SuccessRate { get { return TotalAttempts == 0 ? 0f : Successes * 100f / TotalAttempts; } }
 
         private int graceFrames;
@@ -367,6 +368,7 @@ namespace PracticeStats
 
         public void ResetStats()
         {
+            AttemptsStarted = 0;
             Successes = 0;
             Failures = 0;
             attemptPending = false;
@@ -439,7 +441,7 @@ namespace PracticeStats
 
             if ((deathIncreased || isFail) && !failCounted)
             {
-                RecordFail();
+                if (attemptPending) RecordFail();
                 attemptPending = false;
                 failCounted = true;
                 FailScreenActive = true;
@@ -472,6 +474,7 @@ namespace PracticeStats
 
                     failCounted = false;
                     attemptPending = true;
+                    AttemptsStarted++;
                     FailScreenActive = false;
                     graceFrames = 12;
                     lastDeaths = deaths;
@@ -496,7 +499,7 @@ namespace PracticeStats
 
             if (isWon)
             {
-                RecordSuccess();
+                if (attemptPending) RecordSuccess();
                 attemptPending = false;
                 Completed = TotalAttempts >= TargetAttempts;
                 WaitingForSuccessContinue = true;
@@ -553,6 +556,7 @@ namespace PracticeStats
 
             endpointRearmFrames = 8;
             attemptPending = true;
+            AttemptsStarted++;
 
             WaitingForSuccessContinue = false;
             FailScreenActive = false;
@@ -673,6 +677,7 @@ namespace PracticeStats
 
                 initializing = false;
                 attemptPending = true;
+                AttemptsStarted++;
                 failCounted = false;
                 WaitingForSuccessContinue = false;
                 FailScreenActive = false;
