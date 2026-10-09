@@ -25,7 +25,7 @@ namespace PracticeStats
             modEntry.OnGUI = OnGUI;
             modEntry.OnSaveGUI = OnSaveGUI;
             modEntry.OnUnload = OnUnload;
-            Log("PracticeStats 0.1.1v loaded (ADOFAI 3.4.0 target).");
+            Log("PracticeStats 0.1.2v loaded (ADOFAI 3.4.0 target).");
             return true;
         }
 
@@ -81,7 +81,7 @@ namespace PracticeStats
             {
                 SyncRangeFromEditor(false);
 
-                RGui.Label("PracticeStats 0.1.1v - ADOFAI 3.4.0");
+                RGui.Label("PracticeStats 0.1.2v - ADOFAI 3.4.0");
                 RGui.Label("Uses ADOFAI built-in practice mode");
                 RGui.Label("Range: editor Shift + Left Click selection");
                 RGui.Space(6f);
@@ -284,6 +284,11 @@ namespace PracticeStats
         private bool continueRequested;
         private int continueDelay;
 
+        // JipperResourcePack stores its own Attempt / Full Attempt counters in
+        // Plays.dat. Keep a watermark so we can fill only missing practice
+        // attempts without double-counting ones Jipper already detected.
+        private int jipperFullAttemptWatermark = -1;
+
         // ResetCustomLevel rebuilds floor runtime state. The built-in practice endpoint
         // (temporary EndOfLevel portal) must be restored after every rebuild.
         private int endpointRearmFrames;
@@ -325,6 +330,11 @@ namespace PracticeStats
 
             SuccessFreeze.Unfreeze();
             BuiltInPractice.Disable();
+
+            // Capture Jipper's total before scnEditor/scnGame starts playback.
+            // Its own patches may count the first attempt automatically.
+            jipperFullAttemptWatermark =
+                JipperAttemptBridge.GetFullAttemptCount();
 
             if (!EditorBridge.PlayFromSingleFloor(StartFloor))
                 return false;
@@ -717,11 +727,11 @@ namespace PracticeStats
             if (CurrentStreak > BestStreak)
                 BestStreak = CurrentStreak;
 
-            // Editor practice bypasses ADOFAI's normal custom-level launch
-            // flow, so the game's persisted CustomWorld_{hash}_Attempts value
-            // is not incremented automatically. Count every finished practice
-            // attempt here, including clears.
-            MapAttemptPersistence.IncrementCurrentMapAttempt();
+            // Jipper's Attempt and Full Attempt are backed by PlayCount.
+            // If Jipper already saw this run, only advance the watermark.
+            // Otherwise add exactly one missing attempt.
+            JipperAttemptBridge.EnsureCurrentAttemptCounted(
+                ref jipperFullAttemptWatermark);
         }
 
         private void RecordFail()
@@ -729,8 +739,9 @@ namespace PracticeStats
             Failures++;
             CurrentStreak = 0;
 
-            // Failures must contribute to the same per-map attempt counter.
-            MapAttemptPersistence.IncrementCurrentMapAttempt();
+            // Failures are attempts too and must update both Jipper counters.
+            JipperAttemptBridge.EnsureCurrentAttemptCounted(
+                ref jipperFullAttemptWatermark);
         }
 
         private static bool ContainsState(string state, string token)
@@ -740,97 +751,190 @@ namespace PracticeStats
         }
     }
 
-    internal static class MapAttemptPersistence
+    internal static class JipperAttemptBridge
     {
-        private static Type adoBaseType;
-        private static MemberInfo customLevelMember;
-        private static Type persistenceType;
-        private static MethodInfo incrementAttemptsMethod;
-        private static bool resolved;
-        private static bool loggedFailure;
+        private static Type playCountType;
+        private static Type overlayType;
 
-        public static bool IncrementCurrentMapAttempt()
+        private static MethodInfo getMapHashMethod;
+        private static MethodInfo getDataMethod;
+        private static MethodInfo addAttemptsMethod;
+
+        private static MemberInfo overlayInstanceMember;
+        private static MemberInfo lastHashMember;
+        private static MemberInfo startProgressMember;
+        private static MemberInfo lastMultiplierMember;
+        private static MethodInfo updateAttemptsMethod;
+
+        private static bool resolved;
+        private static bool unavailableLogged;
+
+        public static int GetFullAttemptCount()
         {
             Resolve();
+            if (playCountType == null ||
+                getMapHashMethod == null ||
+                getDataMethod == null)
+                return -1;
 
             try
             {
-                if (adoBaseType == null ||
-                    customLevelMember == null ||
-                    persistenceType == null ||
-                    incrementAttemptsMethod == null)
-                {
-                    LogFailureOnce("required ADOFAI persistence API was not found");
-                    return false;
-                }
+                object hash = getMapHashMethod.Invoke(null, null);
+                if (hash == null) return -1;
 
-                object customLevel =
-                    ReflectionUtil.ReadMember(null, customLevelMember);
+                object data =
+                    getDataMethod.Invoke(null, new object[] { hash });
 
-                if (customLevel == null)
-                {
-                    LogFailureOnce("ADOBase.customLevel is null");
-                    return false;
-                }
+                if (data == null) return -1;
 
                 const BindingFlags all =
                     BindingFlags.Public | BindingFlags.NonPublic |
                     BindingFlags.Static | BindingFlags.Instance;
 
-                MemberInfo levelDataMember =
-                    ReflectionUtil.FindMember(customLevel.GetType(), "levelData", all);
+                MethodInfo getAttempts =
+                    data.GetType().GetMethods(all)
+                    .FirstOrDefault(m =>
+                        m.Name == "GetAttempts" &&
+                        m.GetParameters().Length == 0);
 
-                if (levelDataMember == null)
+                if (getAttempts == null) return -1;
+
+                object raw = getAttempts.Invoke(data, null);
+                return raw == null ? -1 : Convert.ToInt32(raw);
+            }
+            catch (Exception ex)
+            {
+                LogUnavailableOnce(
+                    "could not read Full Attempt: " + ex.Message);
+                return -1;
+            }
+        }
+
+        public static bool EnsureCurrentAttemptCounted(ref int watermark)
+        {
+            Resolve();
+
+            if (playCountType == null ||
+                overlayType == null ||
+                addAttemptsMethod == null ||
+                overlayInstanceMember == null)
+            {
+                LogUnavailableOnce(
+                    "JipperResourcePack PlayCount API was not found");
+                return false;
+            }
+
+            try
+            {
+                int current = GetFullAttemptCount();
+
+                // If Jipper itself incremented this attempt through one of its
+                // own patches, do not add it again.
+                if (watermark >= 0 && current > watermark)
                 {
-                    LogFailureOnce("customLevel.levelData was not found");
+                    watermark = current;
+                    RefreshOverlay();
+                    return true;
+                }
+
+                // If Jipper became available only after session start, avoid a
+                // blind increment that could double-count the first run.
+                if (watermark < 0)
+                {
+                    watermark = current;
+                    RefreshOverlay();
+                    return current >= 0;
+                }
+
+                object overlay =
+                    ReflectionUtil.ReadMember(
+                        null,
+                        overlayInstanceMember);
+
+                if (overlay == null)
+                {
+                    LogUnavailableOnce(
+                        "Jipper overlay instance is null");
                     return false;
                 }
 
-                object levelData =
-                    ReflectionUtil.ReadMember(customLevel, levelDataMember);
+                object hash =
+                    lastHashMember == null
+                        ? null
+                        : ReflectionUtil.ReadMember(
+                            overlay,
+                            lastHashMember);
 
-                if (levelData == null)
+                object rawProgress =
+                    startProgressMember == null
+                        ? null
+                        : ReflectionUtil.ReadMember(
+                            overlay,
+                            startProgressMember);
+
+                object rawMultiplier =
+                    lastMultiplierMember == null
+                        ? null
+                        : ReflectionUtil.ReadMember(
+                            overlay,
+                            lastMultiplierMember);
+
+                if (hash == null ||
+                    rawProgress == null ||
+                    rawMultiplier == null)
                 {
-                    LogFailureOnce("customLevel.levelData is null");
+                    LogUnavailableOnce(
+                        "Jipper attempt metadata was not available");
                     return false;
                 }
 
-                MemberInfo hashMember =
-                    ReflectionUtil.FindMember(levelData.GetType(), "Hash", all) ??
-                    ReflectionUtil.FindMember(levelData.GetType(), "hash", all);
+                float progress = Convert.ToSingle(rawProgress);
+                float multiplier = Convert.ToSingle(rawMultiplier);
 
-                if (hashMember == null)
-                {
-                    LogFailureOnce("levelData.Hash was not found");
-                    return false;
-                }
-
-                object rawHash =
-                    ReflectionUtil.ReadMember(levelData, hashMember);
-
-                string hash = rawHash == null ? null : rawHash.ToString();
-
-                if (string.IsNullOrEmpty(hash))
-                {
-                    LogFailureOnce("current custom-level hash is empty");
-                    return false;
-                }
-
-                // This is ADOFAI's own persistent map-attempt API:
-                // Persistence.IncrementCustomWorldAttempts(hash)
-                // -> CustomWorld_{hash}_Attempts += 1
-                // -> Persistence.Save().
-                incrementAttemptsMethod.Invoke(
+                addAttemptsMethod.Invoke(
                     null,
-                    new object[] { hash });
+                    new object[]
+                    {
+                        hash,
+                        progress,
+                        multiplier
+                    });
 
+                int after = GetFullAttemptCount();
+                watermark =
+                    after >= 0
+                        ? after
+                        : watermark + 1;
+
+                RefreshOverlay();
                 return true;
             }
             catch (Exception ex)
             {
-                LogFailureOnce("exception: " + ex.Message);
+                LogUnavailableOnce(
+                    "could not update Attempt/Full Attempt: " +
+                    ex.Message);
                 return false;
             }
+        }
+
+        private static void RefreshOverlay()
+        {
+            try
+            {
+                if (overlayInstanceMember == null ||
+                    updateAttemptsMethod == null)
+                    return;
+
+                object overlay =
+                    ReflectionUtil.ReadMember(
+                        null,
+                        overlayInstanceMember);
+
+                if (overlay != null)
+                    updateAttemptsMethod.Invoke(overlay, null);
+            }
+            catch { }
         }
 
         private static void Resolve()
@@ -842,39 +946,82 @@ namespace PracticeStats
                 BindingFlags.Public | BindingFlags.NonPublic |
                 BindingFlags.Static | BindingFlags.Instance;
 
-            adoBaseType = ReflectionUtil.FindType("ADOBase");
-            if (adoBaseType != null)
-            {
-                customLevelMember =
-                    ReflectionUtil.FindMember(
-                        adoBaseType,
-                        "customLevel",
-                        all);
-            }
+            playCountType =
+                ReflectionUtil.FindType(
+                    "JipperResourcePack.OverlayContents.PlayCount");
 
-            persistenceType = ReflectionUtil.FindType("Persistence");
-            if (persistenceType != null)
+            overlayType =
+                ReflectionUtil.FindType(
+                    "JipperResourcePack.OverlayContents.Overlay");
+
+            if (playCountType != null)
             {
-                incrementAttemptsMethod =
-                    persistenceType.GetMethods(all)
+                getMapHashMethod =
+                    playCountType.GetMethods(all)
+                    .FirstOrDefault(m =>
+                        m.Name == "GetMapHash" &&
+                        m.GetParameters().Length == 0);
+
+                getDataMethod =
+                    playCountType.GetMethods(all)
+                    .FirstOrDefault(m =>
+                        m.Name == "GetData" &&
+                        m.GetParameters().Length == 1);
+
+                addAttemptsMethod =
+                    playCountType.GetMethods(all)
                     .FirstOrDefault(m =>
                     {
-                        if (m.Name != "IncrementCustomWorldAttempts")
+                        if (m.Name != "AddAttempts")
                             return false;
 
                         ParameterInfo[] p = m.GetParameters();
 
-                        return p.Length == 1 &&
-                               p[0].ParameterType == typeof(string);
+                        return p.Length == 3 &&
+                               p[1].ParameterType == typeof(float) &&
+                               p[2].ParameterType == typeof(float);
                     });
+            }
+
+            if (overlayType != null)
+            {
+                overlayInstanceMember =
+                    ReflectionUtil.FindMember(
+                        overlayType,
+                        "Instance",
+                        all);
+
+                lastHashMember =
+                    ReflectionUtil.FindMember(
+                        overlayType,
+                        "LastHash",
+                        all);
+
+                startProgressMember =
+                    ReflectionUtil.FindMember(
+                        overlayType,
+                        "StartProgress",
+                        all);
+
+                lastMultiplierMember =
+                    ReflectionUtil.FindMember(
+                        overlayType,
+                        "LastMultiplier",
+                        all);
+
+                updateAttemptsMethod =
+                    overlayType.GetMethods(all)
+                    .FirstOrDefault(m =>
+                        m.Name == "UpdateAttempts" &&
+                        m.GetParameters().Length == 0);
             }
         }
 
-        private static void LogFailureOnce(string reason)
+        private static void LogUnavailableOnce(string reason)
         {
-            if (loggedFailure) return;
-            loggedFailure = true;
-            Main.Log("Map attempt persistence unavailable: " + reason);
+            if (unavailableLogged) return;
+            unavailableLogged = true;
+            Main.Log("Jipper attempt integration unavailable: " + reason);
         }
     }
 
