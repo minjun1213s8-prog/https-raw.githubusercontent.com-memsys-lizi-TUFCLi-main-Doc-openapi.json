@@ -3,7 +3,6 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using System.Reflection.Emit;
 using UnityModManagerNet;
 
 namespace PracticeStats
@@ -33,7 +32,11 @@ namespace PracticeStats
         private static bool OnToggle(UnityModManager.ModEntry entry, bool value)
         {
             enabled = value;
-            if (!value) session.Stop();
+            if (!value)
+            {
+                session.Stop();
+                RuntimeOverlay.Hide();
+            }
             status = value ? "Enabled" : "Disabled";
             return true;
         }
@@ -41,6 +44,7 @@ namespace PracticeStats
         private static bool OnUnload(UnityModManager.ModEntry entry)
         {
             session.Stop();
+            RuntimeOverlay.Hide();
             enabled = false;
             return true;
         }
@@ -50,7 +54,6 @@ namespace PracticeStats
             if (!enabled) return;
             try
             {
-                RuntimeOverlay.EnsureAttached();
                 SyncRangeFromEditor(false);
 
                 if (UnityBridge.GetKeyDown("F8")) TogglePractice();
@@ -63,6 +66,8 @@ namespace PracticeStats
                 session.Tick();
                 if (session.Completed && !session.WaitingForContinue)
                     status = "Completed";
+
+                UpdateRuntimeOverlay();
             }
             catch (Exception ex)
             {
@@ -185,9 +190,13 @@ namespace PracticeStats
             attemptsText = session.TargetAttempts.ToString();
         }
 
-        public static void DrawRuntimeOverlay()
+        private static void UpdateRuntimeOverlay()
         {
-            if (!enabled || !session.Running) return;
+            if (!enabled || !session.Running)
+            {
+                RuntimeOverlay.Hide();
+                return;
+            }
 
             int remaining = Math.Max(0, session.TargetAttempts - session.TotalAttempts);
             string prompt = "";
@@ -203,7 +212,7 @@ namespace PracticeStats
                 "Success rate: " + session.SuccessRate.ToString("0.00") + "%" +
                 prompt;
 
-            OverlayRenderer.Draw(text, session.WaitingForContinue);
+            RuntimeOverlay.Show(text);
         }
 
         internal static void SetStatus(string text)
@@ -837,143 +846,210 @@ namespace PracticeStats
 
     internal static class RuntimeOverlay
     {
-        private static Type behaviourType;
+        private static object rootObject;
+        private static object textComponent;
+        private static MethodInfo setActiveMethod;
+        private static PropertyInfo textProperty;
+        private static bool creationFailed;
 
-        public static void EnsureAttached()
+        public static void Show(string text)
         {
+            if (!EnsureCreated()) return;
+
             try
             {
-                object host = EditorBridge.RawInstance() ?? GameBridge.Controller();
-                if (host == null) return;
-
-                Type overlayType = GetOrCreateBehaviourType();
-                if (overlayType == null) return;
-
-                const BindingFlags all = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
-                PropertyInfo gameObjectProp = host.GetType().GetProperty("gameObject", all);
-                if (gameObjectProp == null) return;
-
-                object gameObject = gameObjectProp.GetValue(host, null);
-                if (gameObject == null) return;
-
-                MethodInfo getComponent = gameObject.GetType().GetMethod("GetComponent", all, null, new[] { typeof(Type) }, null);
-                MethodInfo addComponent = gameObject.GetType().GetMethod("AddComponent", all, null, new[] { typeof(Type) }, null);
-                if (addComponent == null) return;
-
-                if (getComponent != null)
-                {
-                    object existing = getComponent.Invoke(gameObject, new object[] { overlayType });
-                    if (existing != null) return;
-                }
-
-                addComponent.Invoke(gameObject, new object[] { overlayType });
+                textProperty.SetValue(textComponent, text, null);
+                setActiveMethod.Invoke(rootObject, new object[] { true });
             }
             catch (Exception ex)
             {
-                Main.Log("Overlay attach error: " + ex.Message);
+                Main.Log("Overlay update error: " + ex.Message);
+                ResetReferences();
             }
         }
 
-        private static Type GetOrCreateBehaviourType()
+        public static void Hide()
         {
-            if (behaviourType != null) return behaviourType;
+            if (rootObject == null || setActiveMethod == null) return;
+            try
+            {
+                setActiveMethod.Invoke(rootObject, new object[] { false });
+            }
+            catch
+            {
+                ResetReferences();
+            }
+        }
+
+        private static bool EnsureCreated()
+        {
+            if (rootObject != null && textComponent != null && setActiveMethod != null && textProperty != null)
+                return true;
+            if (creationFailed) return false;
 
             try
             {
-                Type monoBehaviour = Type.GetType("UnityEngine.MonoBehaviour, UnityEngine.CoreModule", false);
-                if (monoBehaviour == null) return null;
+                Type gameObjectType = Type.GetType("UnityEngine.GameObject, UnityEngine.CoreModule", false);
+                Type rectTransformType = Type.GetType("UnityEngine.RectTransform, UnityEngine.CoreModule", false);
+                Type transformType = Type.GetType("UnityEngine.Transform, UnityEngine.CoreModule", false);
+                Type vector2Type = Type.GetType("UnityEngine.Vector2, UnityEngine.CoreModule", false);
+                Type canvasType = Type.GetType("UnityEngine.Canvas, UnityEngine.UIModule", false);
+                Type textType = Type.GetType("UnityEngine.UI.Text, UnityEngine.UI", false);
+                Type fontType = Type.GetType("UnityEngine.Font, UnityEngine.TextRenderingModule", false);
 
-                AssemblyName name = new AssemblyName("PracticeStats.RuntimeOverlay");
-                AssemblyBuilder assembly = AssemblyBuilder.DefineDynamicAssembly(name, AssemblyBuilderAccess.Run);
-                ModuleBuilder module = assembly.DefineDynamicModule("main");
-                TypeBuilder type = module.DefineType(
-                    "PracticeStatsRuntimeOverlayBehaviour",
-                    TypeAttributes.Public | TypeAttributes.Class,
-                    monoBehaviour);
+                if (gameObjectType == null || rectTransformType == null || transformType == null ||
+                    vector2Type == null || canvasType == null || textType == null)
+                {
+                    creationFailed = true;
+                    Main.Log("Overlay UI types were not found.");
+                    return false;
+                }
 
-                MethodBuilder onGui = type.DefineMethod(
-                    "OnGUI",
-                    MethodAttributes.Public,
-                    typeof(void),
-                    Type.EmptyTypes);
+                ConstructorInfo gameObjectCtor = gameObjectType.GetConstructor(new[] { typeof(string), typeof(Type[]) });
+                if (gameObjectCtor == null)
+                {
+                    creationFailed = true;
+                    Main.Log("GameObject(string, Type[]) constructor was not found.");
+                    return false;
+                }
 
-                ILGenerator il = onGui.GetILGenerator();
-                MethodInfo draw = typeof(Main).GetMethod("DrawRuntimeOverlay", BindingFlags.Public | BindingFlags.Static);
-                il.Emit(OpCodes.Call, draw);
-                il.Emit(OpCodes.Ret);
+                rootObject = gameObjectCtor.Invoke(new object[]
+                {
+                    "PracticeStatsOverlay",
+                    new Type[] { rectTransformType, canvasType }
+                });
 
-                behaviourType = type.CreateTypeInfo().AsType();
-                return behaviourType;
+                setActiveMethod = gameObjectType.GetMethod(
+                    "SetActive",
+                    BindingFlags.Public | BindingFlags.Instance,
+                    null,
+                    new[] { typeof(bool) },
+                    null);
+
+                MethodInfo getComponent = gameObjectType.GetMethod(
+                    "GetComponent",
+                    BindingFlags.Public | BindingFlags.Instance,
+                    null,
+                    new[] { typeof(Type) },
+                    null);
+
+                PropertyInfo transformProperty = gameObjectType.GetProperty(
+                    "transform",
+                    BindingFlags.Public | BindingFlags.Instance);
+
+                if (setActiveMethod == null || getComponent == null || transformProperty == null)
+                    throw new MissingMethodException("Required GameObject API was not found.");
+
+                object canvas = getComponent.Invoke(rootObject, new object[] { canvasType });
+                if (canvas == null) throw new InvalidOperationException("Canvas could not be created.");
+
+                PropertyInfo renderModeProperty = canvasType.GetProperty("renderMode", BindingFlags.Public | BindingFlags.Instance);
+                if (renderModeProperty != null)
+                {
+                    object overlayMode = Enum.Parse(renderModeProperty.PropertyType, "ScreenSpaceOverlay", true);
+                    renderModeProperty.SetValue(canvas, overlayMode, null);
+                }
+
+                PropertyInfo sortingOrderProperty = canvasType.GetProperty("sortingOrder", BindingFlags.Public | BindingFlags.Instance);
+                if (sortingOrderProperty != null)
+                    sortingOrderProperty.SetValue(canvas, 5000, null);
+
+                object textObject = gameObjectCtor.Invoke(new object[]
+                {
+                    "PracticeStatsText",
+                    new Type[] { rectTransformType, textType }
+                });
+
+                object rootTransform = transformProperty.GetValue(rootObject, null);
+                object childTransform = transformProperty.GetValue(textObject, null);
+
+                MethodInfo setParent = transformType.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                    .FirstOrDefault(m =>
+                    {
+                        if (m.Name != "SetParent") return false;
+                        ParameterInfo[] p = m.GetParameters();
+                        return p.Length == 2 && p[0].ParameterType == transformType && p[1].ParameterType == typeof(bool);
+                    });
+
+                if (setParent == null) throw new MissingMethodException("Transform.SetParent was not found.");
+                setParent.Invoke(childTransform, new object[] { rootTransform, false });
+
+                object rectTransform = getComponent.Invoke(textObject, new object[] { rectTransformType });
+                textComponent = getComponent.Invoke(textObject, new object[] { textType });
+                if (rectTransform == null || textComponent == null)
+                    throw new InvalidOperationException("Overlay text components could not be created.");
+
+                ConstructorInfo vector2Ctor = vector2Type.GetConstructor(new[] { typeof(float), typeof(float) });
+                if (vector2Ctor == null) throw new MissingMethodException("Vector2 constructor was not found.");
+
+                object topRight = vector2Ctor.Invoke(new object[] { 1f, 1f });
+                object position = vector2Ctor.Invoke(new object[] { -24f, -78f });
+                object size = vector2Ctor.Invoke(new object[] { 330f, 190f });
+
+                SetProperty(rectTransform, "anchorMin", topRight);
+                SetProperty(rectTransform, "anchorMax", topRight);
+                SetProperty(rectTransform, "pivot", topRight);
+                SetProperty(rectTransform, "anchoredPosition", position);
+                SetProperty(rectTransform, "sizeDelta", size);
+
+                textProperty = textType.GetProperty("text", BindingFlags.Public | BindingFlags.Instance);
+                SetProperty(textComponent, "fontSize", 22);
+                SetEnumProperty(textComponent, "alignment", "UpperRight");
+                SetEnumProperty(textComponent, "horizontalOverflow", "Overflow");
+                SetEnumProperty(textComponent, "verticalOverflow", "Overflow");
+
+                if (fontType != null)
+                {
+                    MethodInfo createFont = fontType.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                        .FirstOrDefault(m =>
+                        {
+                            if (m.Name != "CreateDynamicFontFromOSFont") return false;
+                            ParameterInfo[] p = m.GetParameters();
+                            return p.Length == 2 && p[0].ParameterType == typeof(string) && p[1].ParameterType == typeof(int);
+                        });
+
+                    if (createFont != null)
+                    {
+                        object font = createFont.Invoke(null, new object[] { "Arial", 22 });
+                        if (font != null) SetProperty(textComponent, "font", font);
+                    }
+                }
+
+                setActiveMethod.Invoke(rootObject, new object[] { false });
+                Main.Log("Runtime overlay created.");
+                return textProperty != null;
             }
             catch (Exception ex)
             {
-                Main.Log("Overlay type error: " + ex.Message);
-                return null;
+                Main.Log("Overlay creation error: " + ex);
+                creationFailed = true;
+                ResetReferences();
+                return false;
             }
         }
-    }
 
-    internal static class OverlayRenderer
-    {
-        private static Type guiType;
-        private static Type rectType;
-        private static Type screenType;
-        private static MethodInfo boxMethod;
-        private static MethodInfo labelMethod;
-        private static ConstructorInfo rectCtor;
-        private static PropertyInfo screenWidth;
-        private static bool resolved;
-
-        public static void Draw(string text, bool waiting)
+        private static void SetProperty(object target, string name, object value)
         {
-            Resolve();
-            if (guiType == null || rectType == null || rectCtor == null || labelMethod == null) return;
-
-            try
-            {
-                int width = 1280;
-                if (screenWidth != null)
-                {
-                    object raw = screenWidth.GetValue(null, null);
-                    if (raw != null) width = Convert.ToInt32(raw);
-                }
-
-                float panelWidth = 260f;
-                float panelHeight = waiting ? 145f : 105f;
-                float x = Math.Max(10f, width - panelWidth - 24f);
-                float y = 78f;
-
-                object panelRect = rectCtor.Invoke(new object[] { x, y, panelWidth, panelHeight });
-                object textRect = rectCtor.Invoke(new object[] { x + 12f, y + 10f, panelWidth - 24f, panelHeight - 18f });
-
-                if (boxMethod != null)
-                    boxMethod.Invoke(null, new object[] { panelRect, "" });
-
-                labelMethod.Invoke(null, new object[] { textRect, text });
-            }
-            catch { }
+            if (target == null) return;
+            PropertyInfo p = target.GetType().GetProperty(name, BindingFlags.Public | BindingFlags.Instance);
+            if (p != null && p.CanWrite) p.SetValue(target, value, null);
         }
 
-        private static void Resolve()
+        private static void SetEnumProperty(object target, string name, string enumName)
         {
-            if (resolved) return;
-            resolved = true;
+            if (target == null) return;
+            PropertyInfo p = target.GetType().GetProperty(name, BindingFlags.Public | BindingFlags.Instance);
+            if (p == null || !p.CanWrite || !p.PropertyType.IsEnum) return;
+            object value = Enum.Parse(p.PropertyType, enumName, true);
+            p.SetValue(target, value, null);
+        }
 
-            guiType = Type.GetType("UnityEngine.GUI, UnityEngine.IMGUIModule", false);
-            rectType = Type.GetType("UnityEngine.Rect, UnityEngine.CoreModule", false);
-            screenType = Type.GetType("UnityEngine.Screen, UnityEngine.CoreModule", false);
-
-            if (rectType != null)
-                rectCtor = rectType.GetConstructor(new[] { typeof(float), typeof(float), typeof(float), typeof(float) });
-
-            if (screenType != null)
-                screenWidth = screenType.GetProperty("width", BindingFlags.Public | BindingFlags.Static);
-
-            if (guiType != null && rectType != null)
-            {
-                boxMethod = guiType.GetMethod("Box", BindingFlags.Public | BindingFlags.Static, null, new[] { rectType, typeof(string) }, null);
-                labelMethod = guiType.GetMethod("Label", BindingFlags.Public | BindingFlags.Static, null, new[] { rectType, typeof(string) }, null);
-            }
+        private static void ResetReferences()
+        {
+            rootObject = null;
+            textComponent = null;
+            setActiveMethod = null;
+            textProperty = null;
         }
     }
 
