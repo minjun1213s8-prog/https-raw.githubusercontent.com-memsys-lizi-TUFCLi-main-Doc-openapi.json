@@ -484,6 +484,12 @@ namespace PracticeStats
 
                     failCounted = false;
                     attemptPending = true;
+
+                    // A fresh attempt is active now, so increment Jipper here
+                    // rather than when the previous attempt died.
+                    JipperAttemptBridge.EnsureCurrentAttemptCounted(
+                        ref jipperFullAttemptWatermark);
+
                     AttemptsStarted++;
                     FailScreenActive = false;
                     graceFrames = 12;
@@ -566,6 +572,11 @@ namespace PracticeStats
 
             endpointRearmFrames = 8;
             attemptPending = true;
+
+            // New attempt has just been launched.
+            JipperAttemptBridge.EnsureCurrentAttemptCounted(
+                ref jipperFullAttemptWatermark);
+
             AttemptsStarted++;
 
             WaitingForSuccessContinue = false;
@@ -687,6 +698,13 @@ namespace PracticeStats
 
                 initializing = false;
                 attemptPending = true;
+
+                // Attempt / Full Attempt are start counters, not result counters.
+                // Jipper may already have counted this first run itself; the
+                // bridge detects that and only fills a missing count.
+                JipperAttemptBridge.EnsureCurrentAttemptCounted(
+                    ref jipperFullAttemptWatermark);
+
                 AttemptsStarted++;
                 failCounted = false;
                 WaitingForSuccessContinue = false;
@@ -726,22 +744,12 @@ namespace PracticeStats
             CurrentStreak++;
             if (CurrentStreak > BestStreak)
                 BestStreak = CurrentStreak;
-
-            // Jipper's Attempt and Full Attempt are backed by PlayCount.
-            // If Jipper already saw this run, only advance the watermark.
-            // Otherwise add exactly one missing attempt.
-            JipperAttemptBridge.EnsureCurrentAttemptCounted(
-                ref jipperFullAttemptWatermark);
         }
 
         private void RecordFail()
         {
             Failures++;
             CurrentStreak = 0;
-
-            // Failures are attempts too and must update both Jipper counters.
-            JipperAttemptBridge.EnsureCurrentAttemptCounted(
-                ref jipperFullAttemptWatermark);
         }
 
         private static bool ContainsState(string state, string token)
