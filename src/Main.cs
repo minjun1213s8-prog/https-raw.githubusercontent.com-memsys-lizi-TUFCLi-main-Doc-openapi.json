@@ -25,7 +25,7 @@ namespace PracticeStats
             modEntry.OnGUI = OnGUI;
             modEntry.OnSaveGUI = OnSaveGUI;
             modEntry.OnUnload = OnUnload;
-            Log("PracticeStats v0.4.2 loaded (ADOFAI 3.4.0 target).");
+            Log("PracticeStats v0.4.3 loaded (ADOFAI 3.4.0 target).");
             return true;
         }
 
@@ -81,7 +81,7 @@ namespace PracticeStats
             {
                 SyncRangeFromEditor(false);
 
-                RGui.Label("PracticeStats v0.4.2 - ADOFAI 3.4.0");
+                RGui.Label("PracticeStats v0.4.3 - ADOFAI 3.4.0");
                 RGui.Label("Uses ADOFAI built-in practice mode");
                 RGui.Label("Range: editor Shift + Left Click selection");
                 RGui.Space(6f);
@@ -282,6 +282,10 @@ namespace PracticeStats
         private bool continueRequested;
         private int continueDelay;
 
+        // ResetCustomLevel rebuilds floor runtime state. The built-in practice endpoint
+        // (temporary EndOfLevel portal) must be restored after every rebuild.
+        private int endpointRearmFrames;
+
         public bool CanStart(out string reason)
         {
             if (EndFloor <= StartFloor)
@@ -329,6 +333,7 @@ namespace PracticeStats
             failCounted = false;
             continueRequested = false;
             continueDelay = 0;
+            endpointRearmFrames = 0;
 
             initializing = true;
             initializeStage = 0;
@@ -349,6 +354,7 @@ namespace PracticeStats
             failCounted = false;
             initializing = false;
             continueRequested = false;
+            endpointRearmFrames = 0;
             BuiltInPractice.Disable();
         }
 
@@ -365,6 +371,16 @@ namespace PracticeStats
         public void Tick()
         {
             if (!Running) return;
+
+            if (endpointRearmFrames > 0)
+            {
+                // This mirrors ADOFAI's own Awake_Rewind practice-mode endpoint setup.
+                // Run it for a few frames because ResetCustomLevel/Play can rebuild floors
+                // across the restart boundary.
+                BuiltInPractice.Configure(StartFloor, EndFloor);
+                BuiltInPractice.ReapplyEndpoint(StartFloor, EndFloor);
+                endpointRearmFrames--;
+            }
 
             if (initializing)
             {
@@ -444,6 +460,10 @@ namespace PracticeStats
 
                 if (current >= StartFloor && current < EndFloor)
                 {
+                    BuiltInPractice.Configure(StartFloor, EndFloor);
+                    BuiltInPractice.ReapplyEndpoint(StartFloor, EndFloor);
+                    endpointRearmFrames = 6;
+
                     failCounted = false;
                     FailScreenActive = false;
                     graceFrames = 12;
@@ -530,6 +550,8 @@ namespace PracticeStats
                 return;
             }
 
+            endpointRearmFrames = 8;
+
             WaitingForSuccessContinue = false;
             FailScreenActive = false;
             failCounted = false;
@@ -577,6 +599,7 @@ namespace PracticeStats
                     return;
                 }
 
+                endpointRearmFrames = 8;
                 initializeStage = 1;
                 initializeDelay = 2;
                 return;
@@ -591,6 +614,10 @@ namespace PracticeStats
 
             if (!invalidState && current >= StartFloor && current < EndFloor)
             {
+                BuiltInPractice.Configure(StartFloor, EndFloor);
+                BuiltInPractice.ReapplyEndpoint(StartFloor, EndFloor);
+                endpointRearmFrames = Math.Max(endpointRearmFrames, 4);
+
                 initializing = false;
                 failCounted = false;
                 WaitingForSuccessContinue = false;
@@ -610,6 +637,7 @@ namespace PracticeStats
             FailScreenActive = false;
             failCounted = false;
             continueRequested = false;
+            endpointRearmFrames = 0;
 
             BuiltInPractice.Disable();
 
@@ -652,6 +680,12 @@ namespace PracticeStats
         private static MemberInfo speedTrialMode;
         private static bool resolved;
 
+        private static Type levelMakerType;
+        private static MemberInfo levelMakerInstance;
+        private static MemberInfo listFloorsMember;
+        private static Type portalType;
+        private static object endOfLevelValue;
+
         private static bool savedCheckpointCaptured;
         private static int savedCheckpoint;
 
@@ -676,6 +710,113 @@ namespace PracticeStats
             Write(speedTrialMode, false);
 
             GameBridge.SetCheckpointsUsed(1);
+        }
+
+        public static bool ReapplyEndpoint(int startFloor, int endFloor)
+        {
+            Resolve();
+            ResolveEndpointSupport();
+
+            if (levelMakerType == null || levelMakerInstance == null ||
+                listFloorsMember == null || endOfLevelValue == null)
+                return false;
+
+            try
+            {
+                object lm = ReflectionUtil.ReadMember(null, levelMakerInstance);
+                if (lm == null) return false;
+
+                IList floors = ReflectionUtil.ReadMember(lm, listFloorsMember) as IList;
+                if (floors == null || floors.Count == 0) return false;
+
+                int endpoint = Math.Max(0, Math.Min(endFloor, floors.Count - 1));
+                bool found = false;
+
+                foreach (object floor in floors)
+                {
+                    if (floor == null) continue;
+
+                    Type floorType = floor.GetType();
+                    const BindingFlags all =
+                        BindingFlags.Public | BindingFlags.NonPublic |
+                        BindingFlags.Instance | BindingFlags.Static;
+
+                    MemberInfo seqMember = ReflectionUtil.FindMember(floorType, "seqID", all);
+                    MemberInfo portalMember = ReflectionUtil.FindMember(floorType, "isportal", all);
+                    MemberInfo levelNumberMember = ReflectionUtil.FindMember(floorType, "levelnumber", all);
+
+                    if (seqMember == null || portalMember == null || levelNumberMember == null)
+                        continue;
+
+                    int seq = Convert.ToInt32(ReflectionUtil.ReadMember(floor, seqMember));
+                    bool wasPortal = false;
+                    object oldPortal = ReflectionUtil.ReadMember(floor, portalMember);
+                    if (oldPortal is bool) wasPortal = (bool)oldPortal;
+
+                    bool shouldBeEndpoint = seq == endpoint;
+
+                    // This is the same practice-mode endpoint rule used by
+                    // scrController.Awake_Rewind: the selected endpoint becomes
+                    // EndOfLevel, and any previous temporary portal is cleared.
+                    if (shouldBeEndpoint || wasPortal)
+                    {
+                        ReflectionUtil.WriteMember(floor, portalMember, shouldBeEndpoint);
+                        ReflectionUtil.WriteMember(floor, levelNumberMember, endOfLevelValue);
+
+                        MethodInfo updateIcon = floorType.GetMethods(all)
+                            .FirstOrDefault(m =>
+                            {
+                                if (m.Name != "UpdateIconSprite") return false;
+                                ParameterInfo[] p = m.GetParameters();
+                                return p.Length == 0 ||
+                                       (p.Length == 1 && p[0].ParameterType == typeof(bool));
+                            });
+
+                        if (updateIcon != null)
+                        {
+                            ParameterInfo[] p = updateIcon.GetParameters();
+                            if (p.Length == 0)
+                                updateIcon.Invoke(floor, null);
+                            else
+                                updateIcon.Invoke(floor, new object[] { false });
+                        }
+                    }
+
+                    if (shouldBeEndpoint)
+                        found = true;
+                }
+
+                return found;
+            }
+            catch (Exception ex)
+            {
+                Main.Log("Practice endpoint reapply error: " + ex.Message);
+                return false;
+            }
+        }
+
+        private static void ResolveEndpointSupport()
+        {
+            if (levelMakerType != null && portalType != null) return;
+
+            levelMakerType = ReflectionUtil.FindType("scrLevelMaker");
+            portalType = ReflectionUtil.FindType("Portal");
+
+            const BindingFlags all =
+                BindingFlags.Public | BindingFlags.NonPublic |
+                BindingFlags.Static | BindingFlags.Instance;
+
+            if (levelMakerType != null)
+            {
+                levelMakerInstance = ReflectionUtil.FindMember(levelMakerType, "instance", all);
+                listFloorsMember = ReflectionUtil.FindMember(levelMakerType, "listFloors", all);
+            }
+
+            if (portalType != null && portalType.IsEnum)
+            {
+                try { endOfLevelValue = Enum.Parse(portalType, "EndOfLevel", true); }
+                catch { endOfLevelValue = null; }
+            }
         }
 
         public static void Disable()
