@@ -18,8 +18,8 @@ jobs:
           mkdir -p out/PracticeStats
           cp src/bin/Release/netstandard2.0/PracticeStats.dll out/PracticeStats/PracticeStats.dll
           cp Info.json out/PracticeStats/Info.json
-          cd out/PracticeStats && zip -r ../PracticeStats_0.1.0v_UMM_ADOFAI_3.4.0.zip .
+          cd out/PracticeStats && zip -r ../PracticeStats_0.1.1v_UMM_ADOFAI_3.4.0.zip .
       - uses: actions/upload-artifact@v4
         with:
-          name: PracticeStats_0.1.0v_UMM_ADOFAI_3.4.0
-          path: out/PracticeStats_0.1.0v_UMM_ADOFAI_3.4.0.zip
+          name: PracticeStats_0.1.1v_UMM_ADOFAI_3.4.0
+          path: out/PracticeStats_0.1.1v_UMM_ADOFAI_3.4.0.zip
