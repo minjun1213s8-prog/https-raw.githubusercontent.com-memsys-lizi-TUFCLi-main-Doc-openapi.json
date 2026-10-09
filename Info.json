@@ -2,7 +2,7 @@
   "Id": "PracticeStats",
   "DisplayName": "PracticeStats",
   "Author": "Wonerd",
-  "Version": "0.4.9",
+  "Version": "0.1.0v",
   "AssemblyName": "PracticeStats.dll",
   "EntryMethod": "PracticeStats.Main.Load"
 }
