@@ -23,6 +23,7 @@ namespace PracticeStats
         {
             mod = modEntry;
             StableAttemptStore.Initialize();
+            ResettableAttemptStore.Initialize();
             modEntry.OnToggle = OnToggle;
             modEntry.OnUpdate = OnUpdate;
             modEntry.OnGUI = OnGUI;
@@ -69,6 +70,14 @@ namespace PracticeStats
                 {
                     session.ResetStats();
                     status = "Stats reset";
+                }
+
+                if (UnityBridge.GetKeyDown("F10"))
+                {
+                    if (ResettableAttemptStore.ResetCurrentMapAttempts())
+                        status = "Attempt reset";
+                    else
+                        status = "Could not reset Attempt";
                 }
 
                 session.Tick();
@@ -118,12 +127,22 @@ namespace PracticeStats
 
                 RGui.Space(8f);
                 RGui.Label("Attempts: " + session.TotalAttempts + " / " + session.TargetAttempts);
+                RGui.Label("Attempt: " + ResettableAttemptStore.GetCurrentMapAttempts() + " (resettable per map)");
                 RGui.Label("Attempt+: " + StableAttemptStore.GetCurrentMapAttempts() + " (persistent per map)");
+
+                if (RGui.Button("Reset Attempt"))
+                {
+                    if (ResettableAttemptStore.ResetCurrentMapAttempts())
+                        status = "Attempt reset";
+                    else
+                        status = "Could not reset Attempt";
+                }
+
                 RGui.Label("Success: " + session.Successes + "    Fail: " + session.Failures);
                 RGui.Label("Success rate: " + session.SuccessRate.ToString("0.00") + "%");
                 RGui.Label("Status: " + status);
                 RGui.Space(6f);
-                RGui.Label("Hotkeys: F8 start/stop, F9 reset");
+                RGui.Label("Hotkeys: F8 start/stop, F9 stats reset, F10 Attempt reset");
             }
             catch (Exception ex)
             {
@@ -752,6 +771,200 @@ namespace PracticeStats
         }
     }
 
+    internal static class ResettableAttemptStore
+    {
+        private static readonly Dictionary<string, int> attempts =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        private static string filePath;
+        private static string backupPath;
+        private static bool initialized;
+
+        public static void Initialize()
+        {
+            if (initialized) return;
+            initialized = true;
+
+            try
+            {
+                string dllPath = typeof(Main).Assembly.Location;
+                string dir = Path.GetDirectoryName(dllPath);
+
+                if (string.IsNullOrEmpty(dir))
+                    dir = ".";
+
+                filePath = Path.Combine(
+                    dir,
+                    "PracticeStats_ResettableAttempts.dat");
+
+                backupPath = filePath + ".bak";
+
+                if (!LoadFile(filePath))
+                    LoadFile(backupPath);
+            }
+            catch (Exception ex)
+            {
+                Main.Log(
+                    "Attempt initialization error: " +
+                    ex.Message);
+            }
+        }
+
+        public static int GetCurrentMapAttempts()
+        {
+            Initialize();
+
+            string key = StableAttemptStore.CurrentMapKey();
+            if (string.IsNullOrEmpty(key))
+                return 0;
+
+            int value;
+            return attempts.TryGetValue(key, out value)
+                ? value
+                : 0;
+        }
+
+        public static int IncrementCurrentMapAttempts()
+        {
+            Initialize();
+
+            string key = StableAttemptStore.CurrentMapKey();
+            if (string.IsNullOrEmpty(key))
+            {
+                Main.Log(
+                    "Attempt skipped: current map unavailable");
+                return 0;
+            }
+
+            int value;
+            attempts.TryGetValue(key, out value);
+            value++;
+            attempts[key] = value;
+
+            Save();
+            return value;
+        }
+
+        public static bool ResetCurrentMapAttempts()
+        {
+            Initialize();
+
+            string key = StableAttemptStore.CurrentMapKey();
+            if (string.IsNullOrEmpty(key))
+                return false;
+
+            attempts[key] = 0;
+            Save();
+            return true;
+        }
+
+        private static bool LoadFile(string path)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(path) ||
+                    !File.Exists(path))
+                    return false;
+
+                int loaded = 0;
+
+                foreach (string rawLine in File.ReadAllLines(path))
+                {
+                    if (string.IsNullOrWhiteSpace(rawLine))
+                        continue;
+
+                    int tab = rawLine.LastIndexOf('\t');
+                    if (tab <= 0 ||
+                        tab >= rawLine.Length - 1)
+                        continue;
+
+                    string encodedKey =
+                        rawLine.Substring(0, tab);
+
+                    string countText =
+                        rawLine.Substring(tab + 1);
+
+                    int count;
+                    if (!int.TryParse(countText, out count) ||
+                        count < 0)
+                        continue;
+
+                    try
+                    {
+                        string key = Encoding.UTF8.GetString(
+                            Convert.FromBase64String(encodedKey));
+
+                        if (string.IsNullOrWhiteSpace(key))
+                            continue;
+
+                        attempts[key] = count;
+                        loaded++;
+                    }
+                    catch
+                    {
+                        // A damaged map entry does not invalidate the rest.
+                    }
+                }
+
+                return loaded > 0;
+            }
+            catch (Exception ex)
+            {
+                Main.Log(
+                    "Attempt load error: " +
+                    ex.Message);
+
+                return false;
+            }
+        }
+
+        private static void Save()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(filePath))
+                    return;
+
+                string tempPath = filePath + ".tmp";
+
+                string[] lines = attempts
+                    .OrderBy(
+                        pair => pair.Key,
+                        StringComparer.OrdinalIgnoreCase)
+                    .Select(pair =>
+                        Convert.ToBase64String(
+                            Encoding.UTF8.GetBytes(pair.Key)) +
+                        "\t" +
+                        pair.Value)
+                    .ToArray();
+
+                File.WriteAllLines(tempPath, lines);
+
+                if (File.Exists(filePath))
+                {
+                    try
+                    {
+                        File.Copy(
+                            filePath,
+                            backupPath,
+                            true);
+                    }
+                    catch { }
+
+                    File.Delete(filePath);
+                }
+
+                File.Move(tempPath, filePath);
+            }
+            catch (Exception ex)
+            {
+                Main.Log(
+                    "Attempt save error: " +
+                    ex.Message);
+            }
+        }
+    }
+
     internal static class StableAttemptStore
     {
         private static readonly Dictionary<string, int> attempts =
@@ -1017,6 +1230,7 @@ namespace PracticeStats
             // practice, while remaining one increment per actual attempt.
             if (startLike && !startPhaseActive)
             {
+                ResettableAttemptStore.IncrementCurrentMapAttempts();
                 StableAttemptStore.IncrementCurrentMapAttempts();
                 startPhaseActive = true;
             }
@@ -1055,8 +1269,15 @@ namespace PracticeStats
                 return;
             }
 
-            int count = StableAttemptStore.GetCurrentMapAttempts();
-            Show("Attempt+ " + count);
+            int attempt =
+                ResettableAttemptStore.GetCurrentMapAttempts();
+
+            int attemptPlus =
+                StableAttemptStore.GetCurrentMapAttempts();
+
+            Show(
+                "Attempt " + attempt + "\n" +
+                "Attempt+ " + attemptPlus);
         }
 
         public static void Hide()
@@ -1360,7 +1581,7 @@ namespace PracticeStats
 
                 object size =
                     v2Ctor.Invoke(
-                        new object[] { 300f, 30f });
+                        new object[] { 300f, 54f });
 
                 SetProperty(
                     textRect,
@@ -1396,7 +1617,7 @@ namespace PracticeStats
                 SetProperty(
                     textComponent,
                     "fontSize",
-                    26);
+                    23);
 
                 // Heavier face for the small HUD readout.
                 SetEnumProperty(
@@ -1452,9 +1673,11 @@ namespace PracticeStats
                         // Unity falls back to the next candidate.
                         string[] preferredFonts =
                         {
+                            "Arial Black",
+                            "Segoe UI Black",
+                            "Segoe UI Bold",
+                            "Malgun Gothic Bold",
                             "Segoe UI Semibold",
-                            "Segoe UI",
-                            "Malgun Gothic",
                             "Arial"
                         };
 
@@ -1469,7 +1692,7 @@ namespace PracticeStats
                                     new object[]
                                     {
                                         fontName,
-                                        26
+                                        23
                                     });
 
                                 if (font != null)
