@@ -875,10 +875,10 @@ namespace PracticeStats
             int value;
             if (!attempts.TryGetValue(key, out value))
             {
-                // The first ever run of a map is Attempt 0.
-                attempts[key] = 0;
+                // The first actual run of a map is Attempt 1.
+                attempts[key] = 1;
                 Save();
-                return 0;
+                return 1;
             }
 
             value++;
@@ -1630,7 +1630,9 @@ namespace PracticeStats
 
         public static void Update()
         {
-            if (!GameBridge.IsGameWorld())
+            // Only show the attempt HUD while a run is actually underway.
+            // The press-to-start/editor waiting state stays clean.
+            if (!GameBridge.IsAttemptHudVisible())
             {
                 Hide();
                 return;
@@ -2873,6 +2875,25 @@ namespace PracticeStats
                 return value == null ? "" : value.ToString();
             }
             catch { return ""; }
+        }
+
+        public static bool IsAttemptHudVisible()
+        {
+            if (!IsGameWorld())
+                return false;
+
+            string state = StateName();
+            if (string.IsNullOrEmpty(state))
+                return false;
+
+            // "Start" is ADOFAI's press-to-start / pre-run state.
+            // Hide there; show once countdown/gameplay/result states begin.
+            if (state.IndexOf(
+                    "Start",
+                    StringComparison.OrdinalIgnoreCase) >= 0)
+                return false;
+
+            return true;
         }
 
         public static void SetCheckpointsUsed(int value)
