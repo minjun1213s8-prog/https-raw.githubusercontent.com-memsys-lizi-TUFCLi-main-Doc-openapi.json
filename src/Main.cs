@@ -1,6 +1,8 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
+using System.Text;
 using System.Linq;
 using System.Reflection;
 using UnityModManagerNet;
@@ -20,6 +22,7 @@ namespace PracticeStats
         public static bool Load(UnityModManager.ModEntry modEntry)
         {
             mod = modEntry;
+            StableAttemptStore.Initialize();
             modEntry.OnToggle = OnToggle;
             modEntry.OnUpdate = OnUpdate;
             modEntry.OnGUI = OnGUI;
@@ -109,6 +112,7 @@ namespace PracticeStats
 
                 RGui.Space(8f);
                 RGui.Label("Attempts: " + session.TotalAttempts + " / " + session.TargetAttempts);
+                RGui.Label("Attempt+: " + StableAttemptStore.GetCurrentMapAttempts() + " (persistent per map)");
                 RGui.Label("Success: " + session.Successes + "    Fail: " + session.Failures);
                 RGui.Label("Success rate: " + session.SuccessRate.ToString("0.00") + "%");
                 RGui.Label("Status: " + status);
@@ -225,6 +229,7 @@ namespace PracticeStats
             string text =
                 "PracticeStats\n" +
                 "Remaining: " + remaining + "\n" +
+                "Attempt+: " + session.StableAttempts + "\n" +
                 "Cleared: " + session.Successes + "\n" +
                 "Success rate: " + session.SuccessRate.ToString("0.00") + "%" +
                 prompt;
@@ -259,6 +264,7 @@ namespace PracticeStats
         public int Failures { get; private set; }
         public int CurrentStreak { get; private set; }
         public int BestStreak { get; private set; }
+        public int StableAttempts { get; private set; }
 
         public bool Running { get; private set; }
         public bool Completed { get; private set; }
@@ -283,11 +289,6 @@ namespace PracticeStats
         // that dismissed the result screen never leaks into the next attempt.
         private bool continueRequested;
         private int continueDelay;
-
-        // JipperResourcePack stores its own Attempt / Full Attempt counters in
-        // Plays.dat. Keep a watermark so we can fill only missing practice
-        // attempts without double-counting ones Jipper already detected.
-        private int jipperFullAttemptWatermark = -1;
 
         // ResetCustomLevel rebuilds floor runtime state. The built-in practice endpoint
         // (temporary EndOfLevel portal) must be restored after every rebuild.
@@ -331,10 +332,7 @@ namespace PracticeStats
             SuccessFreeze.Unfreeze();
             BuiltInPractice.Disable();
 
-            // Capture Jipper's total before scnEditor/scnGame starts playback.
-            // Its own patches may count the first attempt automatically.
-            jipperFullAttemptWatermark =
-                JipperAttemptBridge.GetFullAttemptCount();
+            StableAttempts = StableAttemptStore.GetCurrentMapAttempts();
 
             if (!EditorBridge.PlayFromSingleFloor(StartFloor))
                 return false;
@@ -484,13 +482,7 @@ namespace PracticeStats
 
                     failCounted = false;
                     attemptPending = true;
-
-                    // A fresh attempt is active now, so increment Jipper here
-                    // rather than when the previous attempt died.
-                    JipperAttemptBridge.EnsureCurrentAttemptCounted(
-                        ref jipperFullAttemptWatermark);
-
-                    AttemptsStarted++;
+                    RegisterAttemptStart();
                     FailScreenActive = false;
                     graceFrames = 12;
                     lastDeaths = deaths;
@@ -572,12 +564,7 @@ namespace PracticeStats
 
             endpointRearmFrames = 8;
             attemptPending = true;
-
-            // New attempt has just been launched.
-            JipperAttemptBridge.EnsureCurrentAttemptCounted(
-                ref jipperFullAttemptWatermark);
-
-            AttemptsStarted++;
+            RegisterAttemptStart();
 
             WaitingForSuccessContinue = false;
             FailScreenActive = false;
@@ -698,14 +685,7 @@ namespace PracticeStats
 
                 initializing = false;
                 attemptPending = true;
-
-                // Attempt / Full Attempt are start counters, not result counters.
-                // Jipper may already have counted this first run itself; the
-                // bridge detects that and only fills a missing count.
-                JipperAttemptBridge.EnsureCurrentAttemptCounted(
-                    ref jipperFullAttemptWatermark);
-
-                AttemptsStarted++;
+                RegisterAttemptStart();
                 failCounted = false;
                 WaitingForSuccessContinue = false;
                 FailScreenActive = false;
@@ -738,6 +718,12 @@ namespace PracticeStats
             Main.SetStatus("Returned to editor");
         }
 
+        private void RegisterAttemptStart()
+        {
+            AttemptsStarted++;
+            StableAttempts = StableAttemptStore.IncrementCurrentMapAttempts();
+        }
+
         private void RecordSuccess()
         {
             Successes++;
@@ -759,277 +745,201 @@ namespace PracticeStats
         }
     }
 
-    internal static class JipperAttemptBridge
+    internal static class StableAttemptStore
     {
-        private static Type playCountType;
-        private static Type overlayType;
+        private static readonly Dictionary<string, int> attempts =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
-        private static MethodInfo getMapHashMethod;
-        private static MethodInfo getDataMethod;
-        private static MethodInfo addAttemptsMethod;
+        private static string filePath;
+        private static string backupPath;
+        private static bool initialized;
 
-        private static MemberInfo overlayInstanceMember;
-        private static MemberInfo lastHashMember;
-        private static MemberInfo startProgressMember;
-        private static MemberInfo lastMultiplierMember;
-        private static MethodInfo updateAttemptsMethod;
-
-        private static bool resolved;
-        private static bool unavailableLogged;
-
-        public static int GetFullAttemptCount()
+        public static void Initialize()
         {
-            Resolve();
-            if (playCountType == null ||
-                getMapHashMethod == null ||
-                getDataMethod == null)
-                return -1;
+            if (initialized) return;
+            initialized = true;
 
             try
             {
-                object hash = getMapHashMethod.Invoke(null, null);
-                if (hash == null) return -1;
+                string dllPath = typeof(Main).Assembly.Location;
+                string dir = Path.GetDirectoryName(dllPath);
 
-                object data =
-                    getDataMethod.Invoke(null, new object[] { hash });
+                if (string.IsNullOrEmpty(dir))
+                    dir = ".";
 
-                if (data == null) return -1;
+                filePath = Path.Combine(dir, "PracticeStats_Attempts.dat");
+                backupPath = filePath + ".bak";
+
+                if (!LoadFile(filePath))
+                    LoadFile(backupPath);
+            }
+            catch (Exception ex)
+            {
+                Main.Log("Attempt+ initialization error: " + ex.Message);
+            }
+        }
+
+        public static int GetCurrentMapAttempts()
+        {
+            Initialize();
+
+            string key = CurrentMapKey();
+            if (string.IsNullOrEmpty(key))
+                return 0;
+
+            int value;
+            return attempts.TryGetValue(key, out value) ? value : 0;
+        }
+
+        public static int IncrementCurrentMapAttempts()
+        {
+            Initialize();
+
+            string key = CurrentMapKey();
+            if (string.IsNullOrEmpty(key))
+            {
+                Main.Log("Attempt+ skipped: current map path unavailable");
+                return 0;
+            }
+
+            int value;
+            attempts.TryGetValue(key, out value);
+            value++;
+            attempts[key] = value;
+
+            Save();
+            return value;
+        }
+
+        private static string CurrentMapKey()
+        {
+            try
+            {
+                Type adoBase = ReflectionUtil.FindType("ADOBase");
+                if (adoBase == null) return null;
 
                 const BindingFlags all =
                     BindingFlags.Public | BindingFlags.NonPublic |
                     BindingFlags.Static | BindingFlags.Instance;
 
-                MethodInfo getAttempts =
-                    data.GetType().GetMethods(all)
-                    .FirstOrDefault(m =>
-                        m.Name == "GetAttempts" &&
-                        m.GetParameters().Length == 0);
+                MemberInfo levelPathMember =
+                    ReflectionUtil.FindMember(adoBase, "levelPath", all);
 
-                if (getAttempts == null) return -1;
+                if (levelPathMember == null) return null;
 
-                object raw = getAttempts.Invoke(data, null);
-                return raw == null ? -1 : Convert.ToInt32(raw);
+                object raw =
+                    ReflectionUtil.ReadMember(null, levelPathMember);
+
+                string path = raw == null ? null : raw.ToString();
+                if (string.IsNullOrWhiteSpace(path))
+                    return null;
+
+                try
+                {
+                    path = Path.GetFullPath(path);
+                }
+                catch { }
+
+                path = path
+                    .Trim()
+                    .Replace('/', '\\')
+                    .TrimEnd('\\')
+                    .ToLowerInvariant();
+
+                return path;
             }
-            catch (Exception ex)
+            catch
             {
-                LogUnavailableOnce(
-                    "could not read Full Attempt: " + ex.Message);
-                return -1;
+                return null;
             }
         }
 
-        public static bool EnsureCurrentAttemptCounted(ref int watermark)
+        private static bool LoadFile(string path)
         {
-            Resolve();
-
-            if (playCountType == null ||
-                overlayType == null ||
-                addAttemptsMethod == null ||
-                overlayInstanceMember == null)
-            {
-                LogUnavailableOnce(
-                    "JipperResourcePack PlayCount API was not found");
-                return false;
-            }
-
             try
             {
-                int current = GetFullAttemptCount();
-
-                // If Jipper itself incremented this attempt through one of its
-                // own patches, do not add it again.
-                if (watermark >= 0 && current > watermark)
-                {
-                    watermark = current;
-                    RefreshOverlay();
-                    return true;
-                }
-
-                // If Jipper became available only after session start, avoid a
-                // blind increment that could double-count the first run.
-                if (watermark < 0)
-                {
-                    watermark = current;
-                    RefreshOverlay();
-                    return current >= 0;
-                }
-
-                object overlay =
-                    ReflectionUtil.ReadMember(
-                        null,
-                        overlayInstanceMember);
-
-                if (overlay == null)
-                {
-                    LogUnavailableOnce(
-                        "Jipper overlay instance is null");
+                if (string.IsNullOrEmpty(path) || !File.Exists(path))
                     return false;
-                }
 
-                object hash =
-                    lastHashMember == null
-                        ? null
-                        : ReflectionUtil.ReadMember(
-                            overlay,
-                            lastHashMember);
+                int loaded = 0;
 
-                object rawProgress =
-                    startProgressMember == null
-                        ? null
-                        : ReflectionUtil.ReadMember(
-                            overlay,
-                            startProgressMember);
-
-                object rawMultiplier =
-                    lastMultiplierMember == null
-                        ? null
-                        : ReflectionUtil.ReadMember(
-                            overlay,
-                            lastMultiplierMember);
-
-                if (hash == null ||
-                    rawProgress == null ||
-                    rawMultiplier == null)
+                foreach (string rawLine in File.ReadAllLines(path))
                 {
-                    LogUnavailableOnce(
-                        "Jipper attempt metadata was not available");
-                    return false;
-                }
+                    if (string.IsNullOrWhiteSpace(rawLine))
+                        continue;
 
-                float progress = Convert.ToSingle(rawProgress);
-                float multiplier = Convert.ToSingle(rawMultiplier);
+                    int tab = rawLine.LastIndexOf('\t');
+                    if (tab <= 0 || tab >= rawLine.Length - 1)
+                        continue;
 
-                addAttemptsMethod.Invoke(
-                    null,
-                    new object[]
+                    string encodedKey = rawLine.Substring(0, tab);
+                    string countText = rawLine.Substring(tab + 1);
+
+                    int count;
+                    if (!int.TryParse(countText, out count) || count < 0)
+                        continue;
+
+                    string key;
+                    try
                     {
-                        hash,
-                        progress,
-                        multiplier
-                    });
+                        byte[] bytes = Convert.FromBase64String(encodedKey);
+                        key = Encoding.UTF8.GetString(bytes);
+                    }
+                    catch
+                    {
+                        // One damaged entry must not wipe every other map.
+                        continue;
+                    }
 
-                int after = GetFullAttemptCount();
-                watermark =
-                    after >= 0
-                        ? after
-                        : watermark + 1;
+                    if (string.IsNullOrWhiteSpace(key))
+                        continue;
 
-                RefreshOverlay();
-                return true;
+                    attempts[key] = count;
+                    loaded++;
+                }
+
+                return loaded > 0 || new FileInfo(path).Length == 0;
             }
             catch (Exception ex)
             {
-                LogUnavailableOnce(
-                    "could not update Attempt/Full Attempt: " +
-                    ex.Message);
+                Main.Log("Attempt+ load error: " + ex.Message);
                 return false;
             }
         }
 
-        private static void RefreshOverlay()
+        private static void Save()
         {
             try
             {
-                if (overlayInstanceMember == null ||
-                    updateAttemptsMethod == null)
+                if (string.IsNullOrEmpty(filePath))
                     return;
 
-                object overlay =
-                    ReflectionUtil.ReadMember(
-                        null,
-                        overlayInstanceMember);
+                string tempPath = filePath + ".tmp";
 
-                if (overlay != null)
-                    updateAttemptsMethod.Invoke(overlay, null);
+                var lines = attempts
+                    .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+                    .Select(pair =>
+                        Convert.ToBase64String(
+                            Encoding.UTF8.GetBytes(pair.Key)) +
+                        "\t" +
+                        pair.Value)
+                    .ToArray();
+
+                File.WriteAllLines(tempPath, lines);
+
+                if (File.Exists(filePath))
+                {
+                    try { File.Copy(filePath, backupPath, true); }
+                    catch { }
+                    File.Delete(filePath);
+                }
+
+                File.Move(tempPath, filePath);
             }
-            catch { }
-        }
-
-        private static void Resolve()
-        {
-            if (resolved) return;
-            resolved = true;
-
-            const BindingFlags all =
-                BindingFlags.Public | BindingFlags.NonPublic |
-                BindingFlags.Static | BindingFlags.Instance;
-
-            playCountType =
-                ReflectionUtil.FindType(
-                    "JipperResourcePack.OverlayContents.PlayCount");
-
-            overlayType =
-                ReflectionUtil.FindType(
-                    "JipperResourcePack.OverlayContents.Overlay");
-
-            if (playCountType != null)
+            catch (Exception ex)
             {
-                getMapHashMethod =
-                    playCountType.GetMethods(all)
-                    .FirstOrDefault(m =>
-                        m.Name == "GetMapHash" &&
-                        m.GetParameters().Length == 0);
-
-                getDataMethod =
-                    playCountType.GetMethods(all)
-                    .FirstOrDefault(m =>
-                        m.Name == "GetData" &&
-                        m.GetParameters().Length == 1);
-
-                addAttemptsMethod =
-                    playCountType.GetMethods(all)
-                    .FirstOrDefault(m =>
-                    {
-                        if (m.Name != "AddAttempts")
-                            return false;
-
-                        ParameterInfo[] p = m.GetParameters();
-
-                        return p.Length == 3 &&
-                               p[1].ParameterType == typeof(float) &&
-                               p[2].ParameterType == typeof(float);
-                    });
+                Main.Log("Attempt+ save error: " + ex.Message);
             }
-
-            if (overlayType != null)
-            {
-                overlayInstanceMember =
-                    ReflectionUtil.FindMember(
-                        overlayType,
-                        "Instance",
-                        all);
-
-                lastHashMember =
-                    ReflectionUtil.FindMember(
-                        overlayType,
-                        "LastHash",
-                        all);
-
-                startProgressMember =
-                    ReflectionUtil.FindMember(
-                        overlayType,
-                        "StartProgress",
-                        all);
-
-                lastMultiplierMember =
-                    ReflectionUtil.FindMember(
-                        overlayType,
-                        "LastMultiplier",
-                        all);
-
-                updateAttemptsMethod =
-                    overlayType.GetMethods(all)
-                    .FirstOrDefault(m =>
-                        m.Name == "UpdateAttempts" &&
-                        m.GetParameters().Length == 0);
-            }
-        }
-
-        private static void LogUnavailableOnce(string reason)
-        {
-            if (unavailableLogged) return;
-            unavailableLogged = true;
-            Main.Log("Jipper attempt integration unavailable: " + reason);
         }
     }
 
