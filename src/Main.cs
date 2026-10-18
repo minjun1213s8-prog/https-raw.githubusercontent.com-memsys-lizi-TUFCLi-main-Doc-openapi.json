@@ -2882,15 +2882,12 @@ namespace PracticeStats
             if (!IsGameWorld())
                 return false;
 
-            string state = StateName();
-            if (string.IsNullOrEmpty(state))
-                return false;
-
-            // "Start" is ADOFAI's press-to-start / pre-run state.
-            // Hide there; show once countdown/gameplay/result states begin.
-            if (state.IndexOf(
-                    "Start",
-                    StringComparison.OrdinalIgnoreCase) >= 0)
+            // In the level editor, scrController can remain alive after a run.
+            // Treat editor playMode as the authoritative boundary: visible for
+            // the whole gameplay screen (including press-to-start/results),
+            // hidden immediately after returning to edit mode.
+            if (EditorBridge.Exists() &&
+                !EditorBridge.IsPlayMode())
                 return false;
 
             return true;
