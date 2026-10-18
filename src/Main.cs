@@ -1132,6 +1132,14 @@ namespace PracticeStats
                     "UnityEngine.UI.Text, UnityEngine.UI",
                     false);
 
+                Type shadowType = Type.GetType(
+                    "UnityEngine.UI.Shadow, UnityEngine.UI",
+                    false);
+
+                Type colorType = Type.GetType(
+                    "UnityEngine.Color, UnityEngine.CoreModule",
+                    false);
+
                 Type fontType = Type.GetType(
                     "UnityEngine.Font, UnityEngine.TextRenderingModule",
                     false);
@@ -1231,15 +1239,25 @@ namespace PracticeStats
                         4999,
                         null);
 
-                object textObject = goCtor.Invoke(
-                    new object[]
-                    {
-                        "AttemptPlusText",
-                        new Type[]
+                Type[] textComponents =
+                    shadowType == null
+                        ? new Type[]
                         {
                             rectTransformType,
                             textType
                         }
+                        : new Type[]
+                        {
+                            rectTransformType,
+                            textType,
+                            shadowType
+                        };
+
+                object textObject = goCtor.Invoke(
+                    new object[]
+                    {
+                        "AttemptPlusText",
+                        textComponents
                     });
 
                 object rootTransform =
@@ -1294,6 +1312,13 @@ namespace PracticeStats
                         textObject,
                         new object[] { textType });
 
+                object shadow =
+                    shadowType == null
+                        ? null
+                        : getComponent.Invoke(
+                            textObject,
+                            new object[] { shadowType });
+
                 if (textRect == null ||
                     textComponent == null)
                     throw new InvalidOperationException(
@@ -1306,6 +1331,18 @@ namespace PracticeStats
                             typeof(float),
                             typeof(float)
                         });
+
+                ConstructorInfo colorCtor =
+                    colorType == null
+                        ? null
+                        : colorType.GetConstructor(
+                            new[]
+                            {
+                                typeof(float),
+                                typeof(float),
+                                typeof(float),
+                                typeof(float)
+                            });
 
                 if (v2Ctor == null)
                     throw new MissingMethodException(
@@ -1359,7 +1396,13 @@ namespace PracticeStats
                 SetProperty(
                     textComponent,
                     "fontSize",
-                    25);
+                    26);
+
+                // Heavier face for the small HUD readout.
+                SetEnumProperty(
+                    textComponent,
+                    "fontStyle",
+                    "Bold");
 
                 SetProperty(
                     textComponent,
@@ -1405,14 +1448,35 @@ namespace PracticeStats
 
                     if (createFont != null)
                     {
-                        object font =
-                            createFont.Invoke(
-                                null,
-                                new object[]
-                                {
-                                    "Arial",
-                                    25
-                                });
+                        // Prefer a cleaner Windows UI face. If it is unavailable,
+                        // Unity falls back to the next candidate.
+                        string[] preferredFonts =
+                        {
+                            "Segoe UI Semibold",
+                            "Segoe UI",
+                            "Malgun Gothic",
+                            "Arial"
+                        };
+
+                        object font = null;
+
+                        foreach (string fontName in preferredFonts)
+                        {
+                            try
+                            {
+                                font = createFont.Invoke(
+                                    null,
+                                    new object[]
+                                    {
+                                        fontName,
+                                        26
+                                    });
+
+                                if (font != null)
+                                    break;
+                            }
+                            catch { }
+                        }
 
                         if (font != null)
                             SetProperty(
@@ -1420,6 +1484,45 @@ namespace PracticeStats
                                 "font",
                                 font);
                     }
+                }
+
+                // Add a dark drop shadow so the text stays legible over bright
+                // effects without needing a background panel.
+                if (shadow != null &&
+                    colorCtor != null)
+                {
+                    object shadowColor =
+                        colorCtor.Invoke(
+                            new object[]
+                            {
+                                0f,
+                                0f,
+                                0f,
+                                0.88f
+                            });
+
+                    object shadowOffset =
+                        v2Ctor.Invoke(
+                            new object[]
+                            {
+                                1.6f,
+                                -1.6f
+                            });
+
+                    SetProperty(
+                        shadow,
+                        "effectColor",
+                        shadowColor);
+
+                    SetProperty(
+                        shadow,
+                        "effectDistance",
+                        shadowOffset);
+
+                    SetProperty(
+                        shadow,
+                        "useGraphicAlpha",
+                        true);
                 }
 
                 setActiveMethod.Invoke(
