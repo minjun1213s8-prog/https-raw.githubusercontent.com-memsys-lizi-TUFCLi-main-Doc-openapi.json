@@ -1555,8 +1555,17 @@ namespace PracticeStats
             }
             else if (blockedByRemainingLimit)
             {
-                // Keep ADOFAI at its press-to-start gate while exhausted.
-                GameBridge.SetPaused(true);
+                if (autoPlay)
+                {
+                    // Autoplay remains available even after a manual start
+                    // was stopped by the remaining-attempt limit.
+                    ReleaseLimitBlock();
+                }
+                else
+                {
+                    // Keep ADOFAI at its press-to-start gate while exhausted.
+                    GameBridge.SetPaused(true);
+                }
             }
 
             lastController = controller;
