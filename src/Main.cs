@@ -39,6 +39,7 @@ namespace PracticeStats
             {
                 session.Stop();
                 RuntimeOverlay.Hide();
+                AttemptPlusOverlay.Hide();
             }
             status = value ? "Enabled" : "Disabled";
             return true;
@@ -48,6 +49,7 @@ namespace PracticeStats
         {
             session.Stop();
             RuntimeOverlay.Hide();
+            AttemptPlusOverlay.Hide();
             enabled = false;
             return true;
         }
@@ -70,7 +72,11 @@ namespace PracticeStats
                 }
 
                 session.Tick();
+
+                // Count every gameplay attempt, not only PracticeStats practice.
+                GlobalAttemptTracker.Tick();
                 UpdateRuntimeOverlay();
+                AttemptPlusOverlay.Update();
             }
             catch (Exception ex)
             {
@@ -229,7 +235,6 @@ namespace PracticeStats
             string text =
                 "PracticeStats\n" +
                 "Remaining: " + remaining + "\n" +
-                "Attempt+: " + session.StableAttempts + "\n" +
                 "Cleared: " + session.Successes + "\n" +
                 "Success rate: " + session.SuccessRate.ToString("0.00") + "%" +
                 prompt;
@@ -720,8 +725,10 @@ namespace PracticeStats
 
         private void RegisterAttemptStart()
         {
+            // Session attempts and persistent Attempt+ are deliberately separate.
+            // GlobalAttemptTracker counts every actual gameplay start.
             AttemptsStarted++;
-            StableAttempts = StableAttemptStore.IncrementCurrentMapAttempts();
+            StableAttempts = StableAttemptStore.GetCurrentMapAttempts();
         }
 
         private void RecordSuccess()
@@ -811,7 +818,7 @@ namespace PracticeStats
             return value;
         }
 
-        private static string CurrentMapKey()
+        public static string CurrentMapKey()
         {
             try
             {
@@ -825,28 +832,50 @@ namespace PracticeStats
                 MemberInfo levelPathMember =
                     ReflectionUtil.FindMember(adoBase, "levelPath", all);
 
-                if (levelPathMember == null) return null;
-
-                object raw =
-                    ReflectionUtil.ReadMember(null, levelPathMember);
-
-                string path = raw == null ? null : raw.ToString();
-                if (string.IsNullOrWhiteSpace(path))
-                    return null;
-
-                try
+                if (levelPathMember != null)
                 {
-                    path = Path.GetFullPath(path);
+                    object raw =
+                        ReflectionUtil.ReadMember(null, levelPathMember);
+
+                    string path = raw == null ? null : raw.ToString();
+
+                    if (!string.IsNullOrWhiteSpace(path))
+                    {
+                        try { path = Path.GetFullPath(path); }
+                        catch { }
+
+                        return "path:" +
+                               path.Trim()
+                                   .Replace('/', '\\')
+                                   .TrimEnd('\\')
+                                   .ToLowerInvariant();
+                    }
                 }
-                catch { }
 
-                path = path
-                    .Trim()
-                    .Replace('/', '\\')
-                    .TrimEnd('\\')
-                    .ToLowerInvariant();
+                // Official/internal levels may not have a custom levelPath.
+                // Keep them stable by ADOFAI's level identifier instead.
+                MemberInfo currentLevelMember =
+                    ReflectionUtil.FindMember(
+                        adoBase,
+                        "currentLevel",
+                        all);
 
-                return path;
+                if (currentLevelMember != null)
+                {
+                    object raw =
+                        ReflectionUtil.ReadMember(
+                            null,
+                            currentLevelMember);
+
+                    string level =
+                        raw == null ? null : raw.ToString();
+
+                    if (!string.IsNullOrWhiteSpace(level))
+                        return "level:" +
+                               level.Trim().ToLowerInvariant();
+                }
+
+                return null;
             }
             catch
             {
@@ -940,6 +969,533 @@ namespace PracticeStats
             {
                 Main.Log("Attempt+ save error: " + ex.Message);
             }
+        }
+    }
+
+    internal static class GlobalAttemptTracker
+    {
+        private static object lastController;
+        private static bool startPhaseActive;
+        private static bool wasGameWorld;
+        private static string lastMapKey;
+
+        public static void Tick()
+        {
+            bool gameWorld = GameBridge.IsGameWorld();
+            object controller = GameBridge.Controller();
+
+            if (!gameWorld || controller == null)
+            {
+                lastController = controller;
+                startPhaseActive = false;
+                wasGameWorld = false;
+                lastMapKey = null;
+                return;
+            }
+
+            string mapKey = StableAttemptStore.CurrentMapKey();
+            string state = GameBridge.StateName();
+
+            bool controllerChanged =
+                !object.ReferenceEquals(controller, lastController);
+
+            bool mapChanged =
+                !string.Equals(
+                    mapKey,
+                    lastMapKey,
+                    StringComparison.OrdinalIgnoreCase);
+
+            if (!wasGameWorld || controllerChanged || mapChanged)
+                startPhaseActive = false;
+
+            bool startLike =
+                Contains(state, "Start") ||
+                Contains(state, "Countdown");
+
+            // Count on entry into ADOFAI's start/countdown phase. This covers
+            // normal map play, editor play, checkpoints and PracticeStats
+            // practice, while remaining one increment per actual attempt.
+            if (startLike && !startPhaseActive)
+            {
+                StableAttemptStore.IncrementCurrentMapAttempts();
+                startPhaseActive = true;
+            }
+            else if (!startLike)
+            {
+                startPhaseActive = false;
+            }
+
+            lastController = controller;
+            wasGameWorld = true;
+            lastMapKey = mapKey;
+        }
+
+        private static bool Contains(string value, string token)
+        {
+            return !string.IsNullOrEmpty(value) &&
+                   value.IndexOf(
+                       token,
+                       StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+    }
+
+    internal static class AttemptPlusOverlay
+    {
+        private static object rootObject;
+        private static object textComponent;
+        private static MethodInfo setActiveMethod;
+        private static PropertyInfo textProperty;
+        private static bool creationFailed;
+
+        public static void Update()
+        {
+            if (!GameBridge.IsGameWorld())
+            {
+                Hide();
+                return;
+            }
+
+            int count = StableAttemptStore.GetCurrentMapAttempts();
+            Show("Attempt+ " + count);
+        }
+
+        public static void Hide()
+        {
+            if (rootObject == null || setActiveMethod == null) return;
+
+            try
+            {
+                setActiveMethod.Invoke(
+                    rootObject,
+                    new object[] { false });
+            }
+            catch
+            {
+                ResetReferences();
+            }
+        }
+
+        private static void Show(string text)
+        {
+            if (!EnsureCreated()) return;
+
+            try
+            {
+                textProperty.SetValue(
+                    textComponent,
+                    text,
+                    null);
+
+                setActiveMethod.Invoke(
+                    rootObject,
+                    new object[] { true });
+            }
+            catch (Exception ex)
+            {
+                Main.Log(
+                    "Attempt+ overlay update error: " +
+                    ex.Message);
+
+                ResetReferences();
+            }
+        }
+
+        private static bool EnsureCreated()
+        {
+            if (rootObject != null &&
+                textComponent != null &&
+                setActiveMethod != null &&
+                textProperty != null)
+                return true;
+
+            if (creationFailed) return false;
+
+            try
+            {
+                Type gameObjectType = Type.GetType(
+                    "UnityEngine.GameObject, UnityEngine.CoreModule",
+                    false);
+
+                Type rectTransformType = Type.GetType(
+                    "UnityEngine.RectTransform, UnityEngine.CoreModule",
+                    false);
+
+                Type vector2Type = Type.GetType(
+                    "UnityEngine.Vector2, UnityEngine.CoreModule",
+                    false);
+
+                Type canvasType = Type.GetType(
+                    "UnityEngine.Canvas, UnityEngine.UIModule",
+                    false);
+
+                Type textType = Type.GetType(
+                    "UnityEngine.UI.Text, UnityEngine.UI",
+                    false);
+
+                Type fontType = Type.GetType(
+                    "UnityEngine.Font, UnityEngine.TextRenderingModule",
+                    false);
+
+                if (gameObjectType == null ||
+                    rectTransformType == null ||
+                    vector2Type == null ||
+                    canvasType == null ||
+                    textType == null)
+                {
+                    creationFailed = true;
+                    return false;
+                }
+
+                ConstructorInfo goCtor =
+                    gameObjectType.GetConstructor(
+                        new[] { typeof(string), typeof(Type[]) });
+
+                if (goCtor == null)
+                    throw new MissingMethodException(
+                        "GameObject constructor was not found.");
+
+                rootObject = goCtor.Invoke(
+                    new object[]
+                    {
+                        "PracticeStatsAttemptPlus",
+                        new Type[]
+                        {
+                            rectTransformType,
+                            canvasType
+                        }
+                    });
+
+                MethodInfo getComponent =
+                    gameObjectType.GetMethod(
+                        "GetComponent",
+                        BindingFlags.Public |
+                        BindingFlags.Instance,
+                        null,
+                        new[] { typeof(Type) },
+                        null);
+
+                PropertyInfo transformProperty =
+                    gameObjectType.GetProperty(
+                        "transform",
+                        BindingFlags.Public |
+                        BindingFlags.Instance);
+
+                setActiveMethod =
+                    gameObjectType.GetMethod(
+                        "SetActive",
+                        BindingFlags.Public |
+                        BindingFlags.Instance,
+                        null,
+                        new[] { typeof(bool) },
+                        null);
+
+                if (getComponent == null ||
+                    transformProperty == null ||
+                    setActiveMethod == null)
+                    throw new MissingMethodException(
+                        "Required GameObject API was not found.");
+
+                object canvas =
+                    getComponent.Invoke(
+                        rootObject,
+                        new object[] { canvasType });
+
+                PropertyInfo renderMode =
+                    canvasType.GetProperty(
+                        "renderMode",
+                        BindingFlags.Public |
+                        BindingFlags.Instance);
+
+                if (renderMode != null)
+                {
+                    object mode = Enum.Parse(
+                        renderMode.PropertyType,
+                        "ScreenSpaceOverlay",
+                        true);
+
+                    renderMode.SetValue(
+                        canvas,
+                        mode,
+                        null);
+                }
+
+                PropertyInfo sortingOrder =
+                    canvasType.GetProperty(
+                        "sortingOrder",
+                        BindingFlags.Public |
+                        BindingFlags.Instance);
+
+                if (sortingOrder != null)
+                    sortingOrder.SetValue(
+                        canvas,
+                        4999,
+                        null);
+
+                object textObject = goCtor.Invoke(
+                    new object[]
+                    {
+                        "AttemptPlusText",
+                        new Type[]
+                        {
+                            rectTransformType,
+                            textType
+                        }
+                    });
+
+                object rootTransform =
+                    transformProperty.GetValue(
+                        rootObject,
+                        null);
+
+                object textTransform =
+                    transformProperty.GetValue(
+                        textObject,
+                        null);
+
+                Type transformType =
+                    rootTransform.GetType();
+
+                MethodInfo setParent =
+                    transformType.GetMethods(
+                        BindingFlags.Public |
+                        BindingFlags.Instance)
+                    .FirstOrDefault(m =>
+                    {
+                        if (m.Name != "SetParent")
+                            return false;
+
+                        ParameterInfo[] p =
+                            m.GetParameters();
+
+                        return p.Length == 2 &&
+                               p[1].ParameterType ==
+                                   typeof(bool);
+                    });
+
+                if (setParent == null)
+                    throw new MissingMethodException(
+                        "Transform.SetParent was not found.");
+
+                setParent.Invoke(
+                    textTransform,
+                    new object[]
+                    {
+                        rootTransform,
+                        false
+                    });
+
+                object textRect =
+                    getComponent.Invoke(
+                        textObject,
+                        new object[] { rectTransformType });
+
+                textComponent =
+                    getComponent.Invoke(
+                        textObject,
+                        new object[] { textType });
+
+                if (textRect == null ||
+                    textComponent == null)
+                    throw new InvalidOperationException(
+                        "Attempt+ UI components could not be created.");
+
+                ConstructorInfo v2Ctor =
+                    vector2Type.GetConstructor(
+                        new[]
+                        {
+                            typeof(float),
+                            typeof(float)
+                        });
+
+                if (v2Ctor == null)
+                    throw new MissingMethodException(
+                        "Vector2 constructor was not found.");
+
+                // Same slot used by JipperResourcePack's Attempt text:
+                // anchor/pivot (0.5, 0), position (310, 35), size (300, 30).
+                object bottomCenter =
+                    v2Ctor.Invoke(
+                        new object[] { 0.5f, 0f });
+
+                object position =
+                    v2Ctor.Invoke(
+                        new object[] { 310f, 35f });
+
+                object size =
+                    v2Ctor.Invoke(
+                        new object[] { 300f, 30f });
+
+                SetProperty(
+                    textRect,
+                    "anchorMin",
+                    bottomCenter);
+
+                SetProperty(
+                    textRect,
+                    "anchorMax",
+                    bottomCenter);
+
+                SetProperty(
+                    textRect,
+                    "pivot",
+                    bottomCenter);
+
+                SetProperty(
+                    textRect,
+                    "anchoredPosition",
+                    position);
+
+                SetProperty(
+                    textRect,
+                    "sizeDelta",
+                    size);
+
+                textProperty =
+                    textType.GetProperty(
+                        "text",
+                        BindingFlags.Public |
+                        BindingFlags.Instance);
+
+                SetProperty(
+                    textComponent,
+                    "fontSize",
+                    25);
+
+                SetProperty(
+                    textComponent,
+                    "raycastTarget",
+                    false);
+
+                SetEnumProperty(
+                    textComponent,
+                    "alignment",
+                    "LowerLeft");
+
+                SetEnumProperty(
+                    textComponent,
+                    "horizontalOverflow",
+                    "Overflow");
+
+                SetEnumProperty(
+                    textComponent,
+                    "verticalOverflow",
+                    "Overflow");
+
+                if (fontType != null)
+                {
+                    MethodInfo createFont =
+                        fontType.GetMethods(
+                            BindingFlags.Public |
+                            BindingFlags.Static)
+                        .FirstOrDefault(m =>
+                        {
+                            if (m.Name !=
+                                "CreateDynamicFontFromOSFont")
+                                return false;
+
+                            ParameterInfo[] p =
+                                m.GetParameters();
+
+                            return p.Length == 2 &&
+                                   p[0].ParameterType ==
+                                       typeof(string) &&
+                                   p[1].ParameterType ==
+                                       typeof(int);
+                        });
+
+                    if (createFont != null)
+                    {
+                        object font =
+                            createFont.Invoke(
+                                null,
+                                new object[]
+                                {
+                                    "Arial",
+                                    25
+                                });
+
+                        if (font != null)
+                            SetProperty(
+                                textComponent,
+                                "font",
+                                font);
+                    }
+                }
+
+                setActiveMethod.Invoke(
+                    rootObject,
+                    new object[] { false });
+
+                return textProperty != null;
+            }
+            catch (Exception ex)
+            {
+                Main.Log(
+                    "Attempt+ overlay creation error: " +
+                    ex);
+
+                creationFailed = true;
+                ResetReferences();
+                return false;
+            }
+        }
+
+        private static void SetProperty(
+            object target,
+            string name,
+            object value)
+        {
+            if (target == null) return;
+
+            PropertyInfo property =
+                target.GetType().GetProperty(
+                    name,
+                    BindingFlags.Public |
+                    BindingFlags.Instance);
+
+            if (property != null &&
+                property.CanWrite)
+                property.SetValue(
+                    target,
+                    value,
+                    null);
+        }
+
+        private static void SetEnumProperty(
+            object target,
+            string name,
+            string enumName)
+        {
+            if (target == null) return;
+
+            PropertyInfo property =
+                target.GetType().GetProperty(
+                    name,
+                    BindingFlags.Public |
+                    BindingFlags.Instance);
+
+            if (property == null ||
+                !property.CanWrite ||
+                !property.PropertyType.IsEnum)
+                return;
+
+            object value = Enum.Parse(
+                property.PropertyType,
+                enumName,
+                true);
+
+            property.SetValue(
+                target,
+                value,
+                null);
+        }
+
+        private static void ResetReferences()
+        {
+            rootObject = null;
+            textComponent = null;
+            setActiveMethod = null;
+            textProperty = null;
         }
     }
 
@@ -1475,6 +2031,7 @@ namespace PracticeStats
         private static MemberInfo transitioningLevelMember;
         private static MemberInfo winTimeMember;
         private static MemberInfo chosenPlanetMember;
+        private static MemberInfo gameworldMember;
         private static MethodInfo resetCustomLevelMethod;
         private static MethodInfo startCoroutineMethod;
         private static MethodInfo onLandOnPortalMethod;
@@ -1496,6 +2053,30 @@ namespace PracticeStats
 
             try { return ReflectionUtil.ReadMember(null, instanceMember); }
             catch { return null; }
+        }
+
+        public static bool IsGameWorld()
+        {
+            object controller = Controller();
+            if (controller == null) return false;
+
+            Resolve();
+
+            if (gameworldMember == null) return false;
+
+            try
+            {
+                object raw =
+                    ReflectionUtil.ReadMember(
+                        controller,
+                        gameworldMember);
+
+                return raw is bool && (bool)raw;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         public static int CurrentFloor()
@@ -1715,6 +2296,7 @@ namespace PracticeStats
             transitioningLevelMember = ReflectionUtil.FindMember(controllerType, "transitioningLevel", all);
             winTimeMember = ReflectionUtil.FindMember(controllerType, "winTime", all);
             chosenPlanetMember = ReflectionUtil.FindMember(controllerType, "chosenPlanet", all);
+            gameworldMember = ReflectionUtil.FindMember(controllerType, "gameworld", all);
 
             portalType = ReflectionUtil.FindType("Portal");
             if (portalType != null && portalType.IsEnum)
