@@ -127,6 +127,7 @@ namespace PracticeStats
                 }
 
                 RGui.Space(8f);
+                RGui.Label("Attempt HUD visibility");
                 bool minus = RGui.Toggle(ShowMinusAttempt, "Show -Attempt");
                 bool normal = RGui.Toggle(ShowAttempt, "Show Attempt");
                 bool plus = RGui.Toggle(ShowAttemptPlus, "Show Attempt+");
@@ -147,7 +148,7 @@ namespace PracticeStats
                         out remaining);
 
                 RGui.Label(
-                    "-Attempt remaining: " +
+                    "-Attempt remaining (shared across maps): " +
                     (remainingConfigured
                         ? remaining.ToString()
                         : "not set"));
@@ -173,7 +174,7 @@ namespace PracticeStats
                             value.ToString();
 
                         GlobalAttemptTracker.OnRemainingLimitChanged();
-                        status = "-Attempt set to " + value;
+                        status = "Shared -Attempt set to " + value;
                     }
                     else
                     {
@@ -1078,13 +1079,19 @@ namespace PracticeStats
 
     internal static class RemainingAttemptStore
     {
-        private static readonly Dictionary<string, int> remaining =
+        private const string GlobalKey = "global";
+
+        // Compatibility cache for older builds that stored -Attempt per map.
+        // It is used only once, then collapsed into one global value.
+        private static readonly Dictionary<string, int> legacyRemaining =
             new Dictionary<string, int>(
                 StringComparer.OrdinalIgnoreCase);
 
         private static string filePath;
         private static string backupPath;
         private static bool initialized;
+        private static bool configured;
+        private static int remaining;
 
         public static void Initialize()
         {
@@ -1107,18 +1114,6 @@ namespace PracticeStats
 
                 if (!LoadFile(filePath))
                     LoadFile(backupPath);
-                // Migrate existing per-map balances once. Prefer the current
-                // map's value; otherwise preserve the highest remaining balance.
-                if (!remaining.ContainsKey("global") && remaining.Count > 0)
-                {
-                    string oldKey = StableAttemptStore.CurrentMapKey();
-                    int oldValue;
-                    if (string.IsNullOrEmpty(oldKey) || !remaining.TryGetValue(oldKey, out oldValue))
-                        oldValue = remaining.Values.Max();
-                    remaining.Clear();
-                    remaining["global"] = oldValue;
-                    Save();
-                }
             }
             catch (Exception ex)
             {
@@ -1128,28 +1123,28 @@ namespace PracticeStats
             }
         }
 
+        // Kept under the old method name so existing tracker/UI code does not
+        // need special cases. The value is no longer map-specific.
         public static bool TryGetCurrentMapRemaining(
             out int value)
         {
             Initialize();
-            value = 0;
+            EnsureLegacyMigration();
 
-            string key = "global";
-            if (string.IsNullOrEmpty(key))
-                return false;
-
-            return remaining.TryGetValue(key, out value);
+            value = configured ? remaining : 0;
+            return configured;
         }
 
+        // Also intentionally keeps its old name. Setting -Attempt on any map
+        // replaces the single shared balance used by every map.
         public static bool SetCurrentMapRemaining(int value)
         {
             Initialize();
 
-            string key = StableAttemptStore.CurrentMapKey();
-            if (string.IsNullOrEmpty(key))
-                return false;
+            configured = true;
+            remaining = Math.Max(0, value);
+            legacyRemaining.Clear();
 
-            remaining[key] = Math.Max(0, value);
             Save();
             return true;
         }
@@ -1158,30 +1153,60 @@ namespace PracticeStats
             out int after)
         {
             Initialize();
-            after = 0;
+            EnsureLegacyMigration();
 
-            string key = StableAttemptStore.CurrentMapKey();
-            if (string.IsNullOrEmpty(key))
-                return true;
-
-            int value;
-            if (!remaining.TryGetValue(key, out value))
+            if (!configured)
             {
-                // Not configured: unlimited.
+                after = 0;
                 return true;
             }
 
-            if (value <= 0)
+            if (remaining <= 0)
             {
                 after = 0;
                 return false;
             }
 
-            value--;
-            remaining[key] = value;
-            after = value;
+            remaining--;
+            after = remaining;
             Save();
             return true;
+        }
+
+        private static void EnsureLegacyMigration()
+        {
+            if (configured ||
+                legacyRemaining.Count == 0)
+                return;
+
+            // If an old per-map value exists for the currently open map,
+            // preserve that exact balance when upgrading.
+            string currentKey =
+                StableAttemptStore.CurrentMapKey();
+
+            int migrated;
+            if (!string.IsNullOrEmpty(currentKey) &&
+                legacyRemaining.TryGetValue(
+                    currentKey,
+                    out migrated))
+            {
+                configured = true;
+                remaining = migrated;
+                legacyRemaining.Clear();
+                Save();
+                return;
+            }
+
+            // Do not guess while sitting outside a map. Once a map is open and
+            // there is no matching legacy entry, keep the highest old balance
+            // rather than silently throwing away remaining attempts.
+            if (string.IsNullOrEmpty(currentKey))
+                return;
+
+            configured = true;
+            remaining = legacyRemaining.Values.Max();
+            legacyRemaining.Clear();
+            Save();
         }
 
         private static bool LoadFile(string path)
@@ -1190,6 +1215,10 @@ namespace PracticeStats
             {
                 if (string.IsNullOrEmpty(path) ||
                     !File.Exists(path))
+                    return false;
+
+                // A zero-byte save is treated as damaged so .bak can recover it.
+                if (new FileInfo(path).Length == 0)
                     return false;
 
                 int loaded = 0;
@@ -1215,21 +1244,35 @@ namespace PracticeStats
                         count < 0)
                         continue;
 
+                    string key;
                     try
                     {
-                        string key = Encoding.UTF8.GetString(
-                            Convert.FromBase64String(encodedKey));
-
-                        if (string.IsNullOrWhiteSpace(key))
-                            continue;
-
-                        remaining[key] = count;
-                        loaded++;
+                        key = Encoding.UTF8.GetString(
+                            Convert.FromBase64String(
+                                encodedKey));
                     }
                     catch
                     {
-                        // Ignore one broken entry and keep the rest.
+                        continue;
                     }
+
+                    if (string.IsNullOrWhiteSpace(key))
+                        continue;
+
+                    if (string.Equals(
+                        key,
+                        GlobalKey,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        configured = true;
+                        remaining = count;
+                    }
+                    else
+                    {
+                        legacyRemaining[key] = count;
+                    }
+
+                    loaded++;
                 }
 
                 return loaded > 0;
@@ -1248,23 +1291,21 @@ namespace PracticeStats
         {
             try
             {
-                if (string.IsNullOrEmpty(filePath))
+                if (string.IsNullOrEmpty(filePath) ||
+                    !configured)
                     return;
 
                 string tempPath = filePath + ".tmp";
 
-                string[] lines = remaining
-                    .OrderBy(
-                        pair => pair.Key,
-                        StringComparer.OrdinalIgnoreCase)
-                    .Select(pair =>
-                        Convert.ToBase64String(
-                            Encoding.UTF8.GetBytes(pair.Key)) +
-                        "\t" +
-                        pair.Value)
-                    .ToArray();
+                string line =
+                    Convert.ToBase64String(
+                        Encoding.UTF8.GetBytes(GlobalKey)) +
+                    "\t" +
+                    remaining;
 
-                File.WriteAllLines(tempPath, lines);
+                File.WriteAllLines(
+                    tempPath,
+                    new[] { line });
 
                 if (File.Exists(filePath))
                 {
