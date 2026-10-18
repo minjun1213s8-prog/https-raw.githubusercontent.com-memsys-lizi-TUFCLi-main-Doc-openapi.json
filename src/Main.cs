@@ -479,7 +479,8 @@ namespace PracticeStats
             // which clears GCS.practiceMode. Treat that as an explicit stop of
             // PracticeStats as well, otherwise stale session state deadlocks
             // the next F8 start.
-            if (EditorBridge.Exists() && !EditorBridge.IsPlayMode())
+            if (EditorBridge.Exists() &&
+                !BuiltInPractice.IsEnabled())
             {
                 ReturnToEditor();
                 return;
@@ -1457,11 +1458,29 @@ namespace PracticeStats
         private static bool startPhaseActive;
         private static bool wasGameWorld;
         private static string lastMapKey;
+
         private static bool blockedByRemainingLimit;
+        private static bool runCandidate;
+        private static bool runCounted;
+        private static bool runAuto;
+        private static int runStartFloor;
 
         public static bool IsLimitBlocked
         {
             get { return blockedByRemainingLimit; }
+        }
+
+        // Before the first tile is actually landed, show the ordinal of the
+        // pending manual run (1, 2, 3...) without persisting it yet.
+        public static bool HasPendingDisplayAttempt
+        {
+            get
+            {
+                return runCandidate &&
+                       !runCounted &&
+                       !runAuto &&
+                       !blockedByRemainingLimit;
+            }
         }
 
         public static void Tick()
@@ -1471,11 +1490,31 @@ namespace PracticeStats
 
             if (!gameWorld || controller == null)
             {
+                ResetRunState();
                 ReleaseLimitBlock();
                 lastController = controller;
                 startPhaseActive = false;
                 wasGameWorld = false;
                 lastMapKey = null;
+                return;
+            }
+
+            // In the editor, playMode can briefly become false around native
+            // fail/restart transitions. PracticeStats' built-in practice flag
+            // is the stronger signal while our repeated run is still active.
+            bool editorGameplay =
+                !EditorBridge.Exists() ||
+                EditorBridge.IsPlayMode() ||
+                BuiltInPractice.IsEnabled();
+
+            if (!editorGameplay)
+            {
+                ResetRunState();
+                ReleaseLimitBlock();
+                startPhaseActive = false;
+                wasGameWorld = true;
+                lastController = controller;
+                lastMapKey = StableAttemptStore.CurrentMapKey();
                 return;
             }
 
@@ -1493,78 +1532,80 @@ namespace PracticeStats
                     lastMapKey,
                     StringComparison.OrdinalIgnoreCase);
 
-            if (!wasGameWorld ||
+            bool newContext =
+                !wasGameWorld ||
                 controllerChanged ||
-                mapChanged)
-            {
-                ReleaseLimitBlock();
-                startPhaseActive = false;
-            }
+                mapChanged;
 
             bool startLike =
                 Contains(state, "Start") ||
-                Contains(state, "Countdown");
+                Contains(state, "Countdown") ||
+                Contains(state, "Checkpoint");
 
-            bool autoPlay = GameBridge.IsAutoPlay();
+            bool terminal =
+                Contains(state, "Fail") ||
+                Contains(state, "Won");
 
-            if (startLike && !startPhaseActive)
+            if (newContext)
             {
-                if (autoPlay)
+                ResetRunState();
+                ReleaseLimitBlock();
+
+                if (!terminal)
                 {
-                    // Autoplay is always allowed and consumes nothing.
-                    ReleaseLimitBlock();
+                    BeginRun();
+                    startPhaseActive = startLike;
                 }
                 else
                 {
-                    int after;
-                    bool allowed =
-                        RemainingAttemptStore
-                            .TryConsumeCurrentMapAttempt(
-                                out after);
-
-                    if (!allowed)
-                    {
-                        BlockForRemainingLimit();
-                        AttemptPlusOverlay
-                            .FlashRemainingExhausted();
-                    }
-                    else
-                    {
-                        ReleaseLimitBlock();
-
-                        // Normal count-up attempts still behave exactly as the
-                        // base version: first ever run starts at Attempt 0.
-                        ResettableAttemptStore
-                            .RecordAttemptStart();
-
-                        StableAttemptStore
-                            .IncrementCurrentMapAttempts();
-                    }
+                    startPhaseActive = false;
                 }
-
-                // Latch even blocked/autoplay starts so a mode toggle in the
-                // same start screen can never double-count or consume twice.
+            }
+            else if (startLike && !startPhaseActive)
+            {
+                BeginRun();
                 startPhaseActive = true;
             }
             else if (!startLike)
             {
-                if (blockedByRemainingLimit)
-                    ReleaseLimitBlock();
-
                 startPhaseActive = false;
             }
-            else if (blockedByRemainingLimit)
+
+            if (blockedByRemainingLimit)
             {
-                if (autoPlay)
+                if (GameBridge.IsAutoPlay())
                 {
-                    // Autoplay remains available even after a manual start
-                    // was stopped by the remaining-attempt limit.
+                    // Autoplay is always allowed, even when manual attempts
+                    // are exhausted, and never consumes/counts an attempt.
                     ReleaseLimitBlock();
+                    runAuto = true;
+                    runCandidate = false;
                 }
                 else
                 {
-                    // Keep ADOFAI at its press-to-start gate while exhausted.
-                    GameBridge.SetPaused(true);
+                    KeepLimitBlocked();
+                }
+            }
+
+            // A manual run only becomes a real attempt after landing the first
+            // tile after its start/checkpoint floor. Missing the very first
+            // tile or leaving before it does not consume or add an attempt.
+            if (runCandidate &&
+                !runCounted &&
+                !runAuto &&
+                !blockedByRemainingLimit)
+            {
+                if (GameBridge.IsAutoPlay())
+                {
+                    runAuto = true;
+                    runCandidate = false;
+                }
+                else
+                {
+                    int current = GameBridge.CurrentFloor();
+
+                    if (current > runStartFloor)
+                        CountQualifiedAttempt();
                 }
             }
 
@@ -1585,9 +1626,12 @@ namespace PracticeStats
             {
                 ReleaseLimitBlock();
 
-                // Re-evaluate the current start phase on the next update so
-                // the newly allowed attempt is consumed and counted once.
+                // Re-evaluate this start/checkpoint phase once. Nothing is
+                // consumed until the first tile is actually landed.
                 startPhaseActive = false;
+                runCandidate = false;
+                runCounted = false;
+                runAuto = false;
             }
         }
 
@@ -1596,16 +1640,102 @@ namespace PracticeStats
             if (!blockedByRemainingLimit)
                 return;
 
+            bool editorExists = EditorBridge.Exists();
+            bool shouldUnpause =
+                !editorExists ||
+                EditorBridge.IsPlayMode();
+
             blockedByRemainingLimit = false;
-            GameBridge.SetPaused(false);
+
+            if (editorExists)
+                EditorBridge.SetPausedInPlayMode(false);
+
+            // If the user already returned to the editor, preserve the
+            // editor's own paused state instead of accidentally starting it.
+            if (shouldUnpause)
+                GameBridge.SetPaused(false);
+        }
+
+        private static void BeginRun()
+        {
+            runCandidate = false;
+            runCounted = false;
+            runAuto = GameBridge.IsAutoPlay();
+            runStartFloor = BuiltInPractice.CurrentCheckpoint();
+
+            if (runAuto)
+            {
+                ReleaseLimitBlock();
+                return;
+            }
+
+            int remaining;
+            bool configured =
+                RemainingAttemptStore
+                    .TryGetCurrentMapRemaining(
+                        out remaining);
+
+            if (configured && remaining <= 0)
+            {
+                BlockForRemainingLimit();
+                AttemptPlusOverlay
+                    .FlashRemainingExhausted();
+                return;
+            }
+
+            ReleaseLimitBlock();
+            runCandidate = true;
+        }
+
+        private static void CountQualifiedAttempt()
+        {
+            ResettableAttemptStore.RecordAttemptStart();
+            StableAttemptStore.IncrementCurrentMapAttempts();
+
+            int remaining;
+            if (RemainingAttemptStore
+                    .TryGetCurrentMapRemaining(out remaining) &&
+                remaining > 0)
+            {
+                RemainingAttemptStore
+                    .SetCurrentMapRemaining(
+                        remaining - 1);
+            }
+
+            runCounted = true;
+            runCandidate = false;
+        }
+
+        private static void ResetRunState()
+        {
+            runCandidate = false;
+            runCounted = false;
+            runAuto = false;
+            runStartFloor = 0;
         }
 
         private static void BlockForRemainingLimit()
         {
             blockedByRemainingLimit = true;
+
+            // scnEditor.playMode is derived from controller.paused unless
+            // pausedInPlayMode is set. Mark it first so pausing for the
+            // attempt limiter cannot expose the editor UI over the countdown.
+            if (EditorBridge.Exists())
+                EditorBridge.SetPausedInPlayMode(true);
+
             GameBridge.SetPaused(true);
+
             Main.SetStatus(
                 "No -Attempt remaining for this map");
+        }
+
+        private static void KeepLimitBlocked()
+        {
+            if (EditorBridge.Exists())
+                EditorBridge.SetPausedInPlayMode(true);
+
+            GameBridge.SetPaused(true);
         }
 
         private static bool Contains(
@@ -1638,11 +1768,18 @@ namespace PracticeStats
                 return;
             }
 
+            int pending =
+                GlobalAttemptTracker.HasPendingDisplayAttempt
+                    ? 1
+                    : 0;
+
             int attempt =
-                ResettableAttemptStore.GetCurrentMapAttempts();
+                ResettableAttemptStore.GetCurrentMapAttempts() +
+                pending;
 
             int attemptPlus =
-                StableAttemptStore.GetCurrentMapAttempts();
+                StableAttemptStore.GetCurrentMapAttempts() +
+                pending;
 
             int remaining;
             bool configured =
@@ -2377,6 +2514,31 @@ namespace PracticeStats
             }
         }
 
+        public static bool IsEnabled()
+        {
+            Resolve();
+
+            try
+            {
+                object raw =
+                    ReflectionUtil.ReadMember(
+                        null,
+                        practiceMode);
+
+                return raw is bool && (bool)raw;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static int CurrentCheckpoint()
+        {
+            Resolve();
+            return ReadInt(checkpointNum, 0);
+        }
+
         public static void Disable()
         {
             Resolve();
@@ -2432,6 +2594,7 @@ namespace PracticeStats
         private static MemberInfo selectedFloorsMember;
         private static MemberInfo floorsMember;
         private static MemberInfo playModeMember;
+        private static MemberInfo pausedInPlayModeMember;
         private static MethodInfo playNoArgs;
         private static MethodInfo playWithArgs;
         private static MethodInfo multiSelectFloorsMethod;
@@ -2454,6 +2617,28 @@ namespace PracticeStats
                 return value is bool && (bool)value;
             }
             catch { return false; }
+        }
+
+        public static void SetPausedInPlayMode(bool value)
+        {
+            object editor = Instance();
+            if (editor == null ||
+                pausedInPlayModeMember == null)
+                return;
+
+            try
+            {
+                ReflectionUtil.WriteMember(
+                    editor,
+                    pausedInPlayModeMember,
+                    value);
+            }
+            catch (Exception ex)
+            {
+                Main.Log(
+                    "pausedInPlayMode update error: " +
+                    ex.Message);
+            }
         }
 
         public static bool TryGetSelectionRange(out int first, out int last, out int count)
@@ -2611,6 +2796,11 @@ namespace PracticeStats
             selectedFloorsMember = ReflectionUtil.FindMember(editorType, "selectedFloors", all);
             floorsMember = ReflectionUtil.FindMember(editorType, "floors", all);
             playModeMember = ReflectionUtil.FindMember(editorType, "playMode", all);
+            pausedInPlayModeMember =
+                ReflectionUtil.FindMember(
+                    editorType,
+                    "pausedInPlayMode",
+                    all);
 
             MethodInfo[] methods = editorType.GetMethods(all);
             playNoArgs = methods.FirstOrDefault(m => m.Name == "Play" && m.GetParameters().Length == 0);
@@ -2882,12 +3072,12 @@ namespace PracticeStats
             if (!IsGameWorld())
                 return false;
 
-            // In the level editor, scrController can remain alive after a run.
-            // Treat editor playMode as the authoritative boundary: visible for
-            // the whole gameplay screen (including press-to-start/results),
-            // hidden immediately after returning to edit mode.
+            // PracticeStats can cross a short native pause during fail/retry.
+            // Keep the HUD in gameplay while practice mode is still active;
+            // once SwitchToEditMode clears practiceMode, edit mode hides it.
             if (EditorBridge.Exists() &&
-                !EditorBridge.IsPlayMode())
+                !EditorBridge.IsPlayMode() &&
+                !BuiltInPractice.IsEnabled())
                 return false;
 
             return true;
