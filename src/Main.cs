@@ -15,6 +15,7 @@ namespace PracticeStats
         private static bool enabled = true;
         private static readonly PracticeSession session = new PracticeSession();
         private static string attemptsText = "100";
+        private static string remainingAttemptsText = "1000";
         private static string status = "Select a range with Shift + Left Click";
         private static bool hasEditorRange;
         private static int selectedCount;
@@ -24,6 +25,7 @@ namespace PracticeStats
             mod = modEntry;
             StableAttemptStore.Initialize();
             ResettableAttemptStore.Initialize();
+            RemainingAttemptStore.Initialize();
             modEntry.OnToggle = OnToggle;
             modEntry.OnUpdate = OnUpdate;
             modEntry.OnGUI = OnGUI;
@@ -39,6 +41,7 @@ namespace PracticeStats
             if (!value)
             {
                 session.Stop();
+                GlobalAttemptTracker.ReleaseLimitBlock();
                 RuntimeOverlay.Hide();
                 AttemptPlusOverlay.Hide();
             }
@@ -49,6 +52,7 @@ namespace PracticeStats
         private static bool OnUnload(UnityModManager.ModEntry entry)
         {
             session.Stop();
+            GlobalAttemptTracker.ReleaseLimitBlock();
             RuntimeOverlay.Hide();
             AttemptPlusOverlay.Hide();
             enabled = false;
@@ -121,6 +125,46 @@ namespace PracticeStats
                 RGui.Label("Attempts: " + session.TotalAttempts + " / " + session.TargetAttempts);
                 RGui.Label("Attempt: " + ResettableAttemptStore.GetCurrentMapAttempts() + " (resettable per map)");
                 RGui.Label("Attempt+: " + StableAttemptStore.GetCurrentMapAttempts() + " (persistent per map)");
+
+                int remaining;
+                bool remainingConfigured =
+                    RemainingAttemptStore.TryGetCurrentMapRemaining(
+                        out remaining);
+
+                RGui.Label(
+                    "-Attempt remaining: " +
+                    (remainingConfigured
+                        ? remaining.ToString()
+                        : "not set"));
+
+                remainingAttemptsText =
+                    RGui.TextField(remainingAttemptsText);
+
+                if (RGui.Button("Set current map -Attempt"))
+                {
+                    int value;
+                    if (int.TryParse(
+                        remainingAttemptsText,
+                        out value))
+                    {
+                        value = Math.Max(
+                            0,
+                            Math.Min(1000000, value));
+
+                        RemainingAttemptStore.SetCurrentMapRemaining(
+                            value);
+
+                        remainingAttemptsText =
+                            value.ToString();
+
+                        GlobalAttemptTracker.OnRemainingLimitChanged();
+                        status = "-Attempt set to " + value;
+                    }
+                    else
+                    {
+                        status = "Enter a valid -Attempt number";
+                    }
+                }
 
                 if (RGui.Button("Reset current map Attempt"))
                 {
@@ -984,6 +1028,209 @@ namespace PracticeStats
         }
     }
 
+    internal static class RemainingAttemptStore
+    {
+        private static readonly Dictionary<string, int> remaining =
+            new Dictionary<string, int>(
+                StringComparer.OrdinalIgnoreCase);
+
+        private static string filePath;
+        private static string backupPath;
+        private static bool initialized;
+
+        public static void Initialize()
+        {
+            if (initialized) return;
+            initialized = true;
+
+            try
+            {
+                string dllPath = typeof(Main).Assembly.Location;
+                string dir = Path.GetDirectoryName(dllPath);
+
+                if (string.IsNullOrEmpty(dir))
+                    dir = ".";
+
+                filePath = Path.Combine(
+                    dir,
+                    "PracticeStats_RemainingAttempts.dat");
+
+                backupPath = filePath + ".bak";
+
+                if (!LoadFile(filePath))
+                    LoadFile(backupPath);
+            }
+            catch (Exception ex)
+            {
+                Main.Log(
+                    "-Attempt initialization error: " +
+                    ex.Message);
+            }
+        }
+
+        public static bool TryGetCurrentMapRemaining(
+            out int value)
+        {
+            Initialize();
+            value = 0;
+
+            string key = StableAttemptStore.CurrentMapKey();
+            if (string.IsNullOrEmpty(key))
+                return false;
+
+            return remaining.TryGetValue(key, out value);
+        }
+
+        public static bool SetCurrentMapRemaining(int value)
+        {
+            Initialize();
+
+            string key = StableAttemptStore.CurrentMapKey();
+            if (string.IsNullOrEmpty(key))
+                return false;
+
+            remaining[key] = Math.Max(0, value);
+            Save();
+            return true;
+        }
+
+        public static bool TryConsumeCurrentMapAttempt(
+            out int after)
+        {
+            Initialize();
+            after = 0;
+
+            string key = StableAttemptStore.CurrentMapKey();
+            if (string.IsNullOrEmpty(key))
+                return true;
+
+            int value;
+            if (!remaining.TryGetValue(key, out value))
+            {
+                // Not configured: unlimited.
+                return true;
+            }
+
+            if (value <= 0)
+            {
+                after = 0;
+                return false;
+            }
+
+            value--;
+            remaining[key] = value;
+            after = value;
+            Save();
+            return true;
+        }
+
+        private static bool LoadFile(string path)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(path) ||
+                    !File.Exists(path))
+                    return false;
+
+                int loaded = 0;
+
+                foreach (string rawLine in File.ReadAllLines(path))
+                {
+                    if (string.IsNullOrWhiteSpace(rawLine))
+                        continue;
+
+                    int tab = rawLine.LastIndexOf('\t');
+                    if (tab <= 0 ||
+                        tab >= rawLine.Length - 1)
+                        continue;
+
+                    string encodedKey =
+                        rawLine.Substring(0, tab);
+
+                    string countText =
+                        rawLine.Substring(tab + 1);
+
+                    int count;
+                    if (!int.TryParse(countText, out count) ||
+                        count < 0)
+                        continue;
+
+                    try
+                    {
+                        string key = Encoding.UTF8.GetString(
+                            Convert.FromBase64String(encodedKey));
+
+                        if (string.IsNullOrWhiteSpace(key))
+                            continue;
+
+                        remaining[key] = count;
+                        loaded++;
+                    }
+                    catch
+                    {
+                        // Ignore one broken entry and keep the rest.
+                    }
+                }
+
+                return loaded > 0;
+            }
+            catch (Exception ex)
+            {
+                Main.Log(
+                    "-Attempt load error: " +
+                    ex.Message);
+
+                return false;
+            }
+        }
+
+        private static void Save()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(filePath))
+                    return;
+
+                string tempPath = filePath + ".tmp";
+
+                string[] lines = remaining
+                    .OrderBy(
+                        pair => pair.Key,
+                        StringComparer.OrdinalIgnoreCase)
+                    .Select(pair =>
+                        Convert.ToBase64String(
+                            Encoding.UTF8.GetBytes(pair.Key)) +
+                        "\t" +
+                        pair.Value)
+                    .ToArray();
+
+                File.WriteAllLines(tempPath, lines);
+
+                if (File.Exists(filePath))
+                {
+                    try
+                    {
+                        File.Copy(
+                            filePath,
+                            backupPath,
+                            true);
+                    }
+                    catch { }
+
+                    File.Delete(filePath);
+                }
+
+                File.Move(tempPath, filePath);
+            }
+            catch (Exception ex)
+            {
+                Main.Log(
+                    "-Attempt save error: " +
+                    ex.Message);
+            }
+        }
+    }
+
     internal static class StableAttemptStore
     {
         private static readonly Dictionary<string, int> attempts =
@@ -1210,6 +1457,12 @@ namespace PracticeStats
         private static bool startPhaseActive;
         private static bool wasGameWorld;
         private static string lastMapKey;
+        private static bool blockedByRemainingLimit;
+
+        public static bool IsLimitBlocked
+        {
+            get { return blockedByRemainingLimit; }
+        }
 
         public static void Tick()
         {
@@ -1218,6 +1471,7 @@ namespace PracticeStats
 
             if (!gameWorld || controller == null)
             {
+                ReleaseLimitBlock();
                 lastController = controller;
                 startPhaseActive = false;
                 wasGameWorld = false;
@@ -1229,7 +1483,9 @@ namespace PracticeStats
             string state = GameBridge.StateName();
 
             bool controllerChanged =
-                !object.ReferenceEquals(controller, lastController);
+                !object.ReferenceEquals(
+                    controller,
+                    lastController);
 
             bool mapChanged =
                 !string.Equals(
@@ -1237,32 +1493,70 @@ namespace PracticeStats
                     lastMapKey,
                     StringComparison.OrdinalIgnoreCase);
 
-            if (!wasGameWorld || controllerChanged || mapChanged)
+            if (!wasGameWorld ||
+                controllerChanged ||
+                mapChanged)
+            {
+                ReleaseLimitBlock();
                 startPhaseActive = false;
+            }
 
             bool startLike =
                 Contains(state, "Start") ||
                 Contains(state, "Countdown");
 
-            // Count on entry into ADOFAI's start/countdown phase. This covers
-            // normal map play, editor play, checkpoints and PracticeStats
-            // practice, while remaining one increment per actual attempt.
+            bool autoPlay = GameBridge.IsAutoPlay();
+
             if (startLike && !startPhaseActive)
             {
-                // Autoplay is a demonstration run, not an attempt.
-                // Latch this start phase even when skipped so turning autoplay
-                // off mid-run cannot create a delayed false increment.
-                if (!GameBridge.IsAutoPlay())
+                if (autoPlay)
                 {
-                    ResettableAttemptStore.RecordAttemptStart();
-                    StableAttemptStore.IncrementCurrentMapAttempts();
+                    // Autoplay is always allowed and consumes nothing.
+                    ReleaseLimitBlock();
+                }
+                else
+                {
+                    int after;
+                    bool allowed =
+                        RemainingAttemptStore
+                            .TryConsumeCurrentMapAttempt(
+                                out after);
+
+                    if (!allowed)
+                    {
+                        BlockForRemainingLimit();
+                        AttemptPlusOverlay
+                            .FlashRemainingExhausted();
+                    }
+                    else
+                    {
+                        ReleaseLimitBlock();
+
+                        // Normal count-up attempts still behave exactly as the
+                        // base version: first ever run starts at Attempt 0.
+                        ResettableAttemptStore
+                            .RecordAttemptStart();
+
+                        StableAttemptStore
+                            .IncrementCurrentMapAttempts();
+                    }
                 }
 
+                // Latch even blocked/autoplay starts so a mode toggle in the
+                // same start screen can never double-count or consume twice.
                 startPhaseActive = true;
             }
             else if (!startLike)
             {
+                if (blockedByRemainingLimit)
+                    ReleaseLimitBlock();
+
                 startPhaseActive = false;
+            }
+            else if (blockedByRemainingLimit)
+            {
+                // Keep ADOFAI at its press-to-start gate while exhausted.
+                GameBridge.SetPaused(true);
             }
 
             lastController = controller;
@@ -1270,7 +1564,44 @@ namespace PracticeStats
             lastMapKey = mapKey;
         }
 
-        private static bool Contains(string value, string token)
+        public static void OnRemainingLimitChanged()
+        {
+            if (!blockedByRemainingLimit)
+                return;
+
+            int remaining;
+            if (RemainingAttemptStore
+                    .TryGetCurrentMapRemaining(out remaining) &&
+                remaining > 0)
+            {
+                ReleaseLimitBlock();
+
+                // Re-evaluate the current start phase on the next update so
+                // the newly allowed attempt is consumed and counted once.
+                startPhaseActive = false;
+            }
+        }
+
+        public static void ReleaseLimitBlock()
+        {
+            if (!blockedByRemainingLimit)
+                return;
+
+            blockedByRemainingLimit = false;
+            GameBridge.SetPaused(false);
+        }
+
+        private static void BlockForRemainingLimit()
+        {
+            blockedByRemainingLimit = true;
+            GameBridge.SetPaused(true);
+            Main.SetStatus(
+                "No -Attempt remaining for this map");
+        }
+
+        private static bool Contains(
+            string value,
+            string token)
         {
             return !string.IsNullOrEmpty(value) &&
                    value.IndexOf(
@@ -1286,6 +1617,7 @@ namespace PracticeStats
         private static MethodInfo setActiveMethod;
         private static PropertyInfo textProperty;
         private static bool creationFailed;
+        private static int remainingFlashFrames;
 
         public static void Update()
         {
@@ -1301,9 +1633,38 @@ namespace PracticeStats
             int attemptPlus =
                 StableAttemptStore.GetCurrentMapAttempts();
 
+            int remaining;
+            bool configured =
+                RemainingAttemptStore.TryGetCurrentMapRemaining(
+                    out remaining);
+
+            string remainingText =
+                configured
+                    ? "-Attempt " + remaining
+                    : "-Attempt --";
+
+            if (GlobalAttemptTracker.IsLimitBlocked)
+                remainingText += "  NO ATTEMPTS LEFT";
+
+            if (remainingFlashFrames > 0)
+            {
+                remainingFlashFrames--;
+
+                remainingText =
+                    "<color=#FF4A4A><b>" +
+                    remainingText +
+                    "</b></color>";
+            }
+
             Show(
+                remainingText + "\n" +
                 "Attempt " + attempt + "\n" +
                 "Attempt+ " + attemptPlus);
+        }
+
+        public static void FlashRemainingExhausted()
+        {
+            remainingFlashFrames = 90;
         }
 
         public static void Hide()
@@ -1607,7 +1968,7 @@ namespace PracticeStats
 
                 object size =
                     v2Ctor.Invoke(
-                        new object[] { 300f, 54f });
+                        new object[] { 360f, 78f });
 
                 SetProperty(
                     textRect,
@@ -1655,6 +2016,11 @@ namespace PracticeStats
                     textComponent,
                     "raycastTarget",
                     false);
+
+                SetProperty(
+                    textComponent,
+                    "supportRichText",
+                    true);
 
                 SetEnumProperty(
                     textComponent,
@@ -2384,6 +2750,7 @@ namespace PracticeStats
         private static MemberInfo winTimeMember;
         private static MemberInfo chosenPlanetMember;
         private static MemberInfo gameworldMember;
+        private static MemberInfo pausedMember;
         private static MethodInfo resetCustomLevelMethod;
         private static MethodInfo startCoroutineMethod;
         private static MethodInfo onLandOnPortalMethod;
@@ -2432,6 +2799,30 @@ namespace PracticeStats
             catch
             {
                 return false;
+            }
+        }
+
+        public static void SetPaused(bool value)
+        {
+            object controller = Controller();
+            if (controller == null) return;
+
+            Resolve();
+
+            if (pausedMember == null) return;
+
+            try
+            {
+                ReflectionUtil.WriteMember(
+                    controller,
+                    pausedMember,
+                    value);
+            }
+            catch (Exception ex)
+            {
+                Main.Log(
+                    "-Attempt pause gate error: " +
+                    ex.Message);
             }
         }
 
@@ -2675,6 +3066,7 @@ namespace PracticeStats
             winTimeMember = ReflectionUtil.FindMember(controllerType, "winTime", all);
             chosenPlanetMember = ReflectionUtil.FindMember(controllerType, "chosenPlanet", all);
             gameworldMember = ReflectionUtil.FindMember(controllerType, "gameworld", all);
+            pausedMember = ReflectionUtil.FindMember(controllerType, "paused", all);
 
             portalType = ReflectionUtil.FindType("Portal");
             if (portalType != null && portalType.IsEnum)
