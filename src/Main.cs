@@ -72,14 +72,6 @@ namespace PracticeStats
                     status = "Stats reset";
                 }
 
-                if (UnityBridge.GetKeyDown("F10"))
-                {
-                    if (ResettableAttemptStore.ResetCurrentMapAttempts())
-                        status = "Attempt reset";
-                    else
-                        status = "Could not reset Attempt";
-                }
-
                 session.Tick();
 
                 // Count every gameplay attempt, not only PracticeStats practice.
@@ -130,7 +122,7 @@ namespace PracticeStats
                 RGui.Label("Attempt: " + ResettableAttemptStore.GetCurrentMapAttempts() + " (resettable per map)");
                 RGui.Label("Attempt+: " + StableAttemptStore.GetCurrentMapAttempts() + " (persistent per map)");
 
-                if (RGui.Button("Reset Attempt"))
+                if (RGui.Button("Reset current map Attempt"))
                 {
                     if (ResettableAttemptStore.ResetCurrentMapAttempts())
                         status = "Attempt reset";
@@ -142,7 +134,7 @@ namespace PracticeStats
                 RGui.Label("Success rate: " + session.SuccessRate.ToString("0.00") + "%");
                 RGui.Label("Status: " + status);
                 RGui.Space(6f);
-                RGui.Label("Hotkeys: F8 start/stop, F9 stats reset, F10 Attempt reset");
+                RGui.Label("Hotkeys: F8 start/stop, F9 stats reset");
             }
             catch (Exception ex)
             {
@@ -1230,8 +1222,15 @@ namespace PracticeStats
             // practice, while remaining one increment per actual attempt.
             if (startLike && !startPhaseActive)
             {
-                ResettableAttemptStore.IncrementCurrentMapAttempts();
-                StableAttemptStore.IncrementCurrentMapAttempts();
+                // Autoplay is a demonstration run, not an attempt.
+                // Latch this start phase even when skipped so turning autoplay
+                // off mid-run cannot create a delayed false increment.
+                if (!GameBridge.IsAutoPlay())
+                {
+                    ResettableAttemptStore.IncrementCurrentMapAttempts();
+                    StableAttemptStore.IncrementCurrentMapAttempts();
+                }
+
                 startPhaseActive = true;
             }
             else if (!startLike)
@@ -2366,6 +2365,10 @@ namespace PracticeStats
 
         private static Type adoBaseType;
         private static MemberInfo playerManagerMember;
+
+        private static Type rdcType;
+        private static MemberInfo rdcAutoMember;
+
         private static MethodInfo anyValidInputMethod;
         private static MethodInfo setResponsiveMethod;
         private static MethodInfo unlockInputMethod;
@@ -2461,6 +2464,28 @@ namespace PracticeStats
 
             try { ReflectionUtil.WriteMember(controller, transitioningLevelMember, value); }
             catch { }
+        }
+
+        public static bool IsAutoPlay()
+        {
+            Resolve();
+
+            if (rdcType == null || rdcAutoMember == null)
+                return false;
+
+            try
+            {
+                object raw =
+                    ReflectionUtil.ReadMember(
+                        null,
+                        rdcAutoMember);
+
+                return raw is bool && (bool)raw;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         public static bool AnyValidInputWasTriggered()
@@ -2629,6 +2654,16 @@ namespace PracticeStats
             {
                 try { endOfLevelPortal = Enum.Parse(portalType, "EndOfLevel", true); }
                 catch { endOfLevelPortal = null; }
+            }
+
+            rdcType = ReflectionUtil.FindType("RDC");
+            if (rdcType != null)
+            {
+                rdcAutoMember =
+                    ReflectionUtil.FindMember(
+                        rdcType,
+                        "auto",
+                        all);
             }
 
             adoBaseType = ReflectionUtil.FindType("ADOBase");
