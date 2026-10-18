@@ -19,10 +19,15 @@ namespace PracticeStats
         private static string status = "Select a range with Shift + Left Click";
         private static bool hasEditorRange;
         private static int selectedCount;
+        internal static bool ShowMinusAttempt = true;
+        internal static bool ShowAttempt = true;
+        internal static bool ShowAttemptPlus = true;
+        private static string visibilityPath;
 
         public static bool Load(UnityModManager.ModEntry modEntry)
         {
             mod = modEntry;
+            LoadVisibility();
             StableAttemptStore.Initialize();
             ResettableAttemptStore.Initialize();
             RemainingAttemptStore.Initialize();
@@ -122,6 +127,16 @@ namespace PracticeStats
                 }
 
                 RGui.Space(8f);
+                bool minus = RGui.Toggle(ShowMinusAttempt, "Show -Attempt");
+                bool normal = RGui.Toggle(ShowAttempt, "Show Attempt");
+                bool plus = RGui.Toggle(ShowAttemptPlus, "Show Attempt+");
+                if (minus != ShowMinusAttempt || normal != ShowAttempt || plus != ShowAttemptPlus)
+                {
+                    ShowMinusAttempt = minus;
+                    ShowAttempt = normal;
+                    ShowAttemptPlus = plus;
+                    SaveVisibility();
+                }
                 RGui.Label("Attempts: " + session.TotalAttempts + " / " + session.TargetAttempts);
                 RGui.Label("Attempt: " + ResettableAttemptStore.GetCurrentMapAttempts() + " (resettable per map)");
                 RGui.Label("Attempt+: " + StableAttemptStore.GetCurrentMapAttempts() + " (persistent per map)");
@@ -140,7 +155,7 @@ namespace PracticeStats
                 remainingAttemptsText =
                     RGui.TextField(remainingAttemptsText);
 
-                if (RGui.Button("Set current map -Attempt"))
+                if (RGui.Button("Set shared -Attempt"))
                 {
                     int value;
                     if (int.TryParse(
@@ -189,6 +204,38 @@ namespace PracticeStats
         private static void OnSaveGUI(UnityModManager.ModEntry entry)
         {
             ApplyAttempts();
+            SaveVisibility();
+        }
+
+        private static void LoadVisibility()
+        {
+            try
+            {
+                visibilityPath = Path.Combine(Path.GetDirectoryName(typeof(Main).Assembly.Location), "PracticeStats_Visibility.dat");
+                if (!File.Exists(visibilityPath)) return;
+                string[] values = File.ReadAllLines(visibilityPath);
+                if (values.Length >= 3)
+                {
+                    ShowMinusAttempt = values[0] != "0";
+                    ShowAttempt = values[1] != "0";
+                    ShowAttemptPlus = values[2] != "0";
+                }
+            }
+            catch (Exception ex) { Log("Visibility load error: " + ex.Message); }
+        }
+
+        private static void SaveVisibility()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(visibilityPath)) return;
+                File.WriteAllLines(visibilityPath, new[] {
+                    ShowMinusAttempt ? "1" : "0",
+                    ShowAttempt ? "1" : "0",
+                    ShowAttemptPlus ? "1" : "0"
+                });
+            }
+            catch (Exception ex) { Log("Visibility save error: " + ex.Message); }
         }
 
         private static void SyncRangeFromEditor(bool announce)
@@ -1060,6 +1107,18 @@ namespace PracticeStats
 
                 if (!LoadFile(filePath))
                     LoadFile(backupPath);
+                // Migrate existing per-map balances once. Prefer the current
+                // map's value; otherwise preserve the highest remaining balance.
+                if (!remaining.ContainsKey("global") && remaining.Count > 0)
+                {
+                    string oldKey = StableAttemptStore.CurrentMapKey();
+                    int oldValue;
+                    if (string.IsNullOrEmpty(oldKey) || !remaining.TryGetValue(oldKey, out oldValue))
+                        oldValue = remaining.Values.Max();
+                    remaining.Clear();
+                    remaining["global"] = oldValue;
+                    Save();
+                }
             }
             catch (Exception ex)
             {
@@ -1075,7 +1134,7 @@ namespace PracticeStats
             Initialize();
             value = 0;
 
-            string key = StableAttemptStore.CurrentMapKey();
+            string key = "global";
             if (string.IsNullOrEmpty(key))
                 return false;
 
@@ -1804,10 +1863,16 @@ namespace PracticeStats
                     "</b></color>";
             }
 
-            Show(
-                remainingText + "\n" +
-                "Attempt " + attempt + "\n" +
-                "Attempt+ " + attemptPlus);
+            var lines = new List<string>();
+            if (Main.ShowMinusAttempt) lines.Add(remainingText);
+            if (Main.ShowAttempt) lines.Add("Attempt " + attempt);
+            if (Main.ShowAttemptPlus) lines.Add("Attempt+ " + attemptPlus);
+            if (lines.Count == 0)
+            {
+                Hide();
+                return;
+            }
+            Show(string.Join("\n", lines.ToArray()));
         }
 
         public static void FlashRemainingExhausted()
@@ -3952,6 +4017,7 @@ namespace PracticeStats
         private static MethodInfo label;
         private static MethodInfo textField;
         private static MethodInfo button;
+        private static MethodInfo toggle;
         private static MethodInfo space;
         private static bool resolved;
 
@@ -3978,6 +4044,14 @@ namespace PracticeStats
 
             object result = button.Invoke(null, new object[] { text, noOptions });
             return result is bool && (bool)result;
+        }
+
+        public static bool Toggle(bool value, string text)
+        {
+            Resolve();
+            if (toggle == null) return value;
+            object result = toggle.Invoke(null, new object[] { value, text, noOptions });
+            return result is bool ? (bool)result : value;
         }
 
         public static void Space(float pixels)
@@ -4009,6 +4083,10 @@ namespace PracticeStats
 
             button = methods.FirstOrDefault(m =>
                 Match(m, "Button", typeof(string), optionType.MakeArrayType()) &&
+                m.ReturnType == typeof(bool));
+
+            toggle = methods.FirstOrDefault(m =>
+                Match(m, "Toggle", typeof(bool), typeof(string), optionType.MakeArrayType()) &&
                 m.ReturnType == typeof(bool));
 
             space = methods.FirstOrDefault(m =>
