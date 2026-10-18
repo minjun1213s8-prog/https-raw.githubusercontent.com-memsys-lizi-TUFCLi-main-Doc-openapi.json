@@ -816,6 +816,33 @@ namespace PracticeStats
                 : 0;
         }
 
+        public static int RecordAttemptStart()
+        {
+            Initialize();
+
+            string key = StableAttemptStore.CurrentMapKey();
+            if (string.IsNullOrEmpty(key))
+            {
+                Main.Log(
+                    "Attempt skipped: current map unavailable");
+                return 0;
+            }
+
+            int value;
+            if (!attempts.TryGetValue(key, out value))
+            {
+                // The first ever run of a map is Attempt 0.
+                attempts[key] = 0;
+                Save();
+                return 0;
+            }
+
+            value++;
+            attempts[key] = value;
+            Save();
+            return value;
+        }
+
         public static int IncrementCurrentMapAttempts()
         {
             Initialize();
@@ -1227,7 +1254,7 @@ namespace PracticeStats
                 // off mid-run cannot create a delayed false increment.
                 if (!GameBridge.IsAutoPlay())
                 {
-                    ResettableAttemptStore.IncrementCurrentMapAttempts();
+                    ResettableAttemptStore.RecordAttemptStart();
                     StableAttemptStore.IncrementCurrentMapAttempts();
                 }
 
