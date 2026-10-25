@@ -1574,10 +1574,10 @@ namespace PracticeStats
 
         public static void Tick()
         {
-            bool gameWorld = GameBridge.IsGameWorld();
+            bool gameplayWorld = GameBridge.IsGameplayWorld();
             object controller = GameBridge.Controller();
 
-            if (!gameWorld || controller == null)
+            if (!gameplayWorld || controller == null)
             {
                 ResetRunState();
                 ReleaseLimitBlock();
@@ -3062,7 +3062,13 @@ namespace PracticeStats
         private static MemberInfo winTimeMember;
         private static MemberInfo chosenPlanetMember;
         private static MemberInfo gameworldMember;
+        private static MemberInfo currFloorMember;
         private static MemberInfo pausedMember;
+
+        private static Type cachedFloorType;
+        private static MemberInfo freeroamMember;
+        private static MemberInfo freeroamGeneratedMember;
+
         private static MethodInfo resetCustomLevelMethod;
         private static MethodInfo startCoroutineMethod;
         private static MethodInfo onLandOnPortalMethod;
@@ -3107,6 +3113,86 @@ namespace PracticeStats
                         gameworldMember);
 
                 return raw is bool && (bool)raw;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static bool IsGameplayWorld()
+        {
+            object controller = Controller();
+            if (controller == null)
+                return false;
+
+            Resolve();
+
+            // Normal rhythm gameplay.
+            if (IsGameWorld())
+                return true;
+
+            // ADOFAI intentionally allows free-roam gameplay while
+            // controller.gameworld is false. Its own pause/gameplay UI uses
+            // the same "gameworld OR freeroam/freeroamGenerated" rule.
+            try
+            {
+                if (currFloorMember == null)
+                    return false;
+
+                object floor =
+                    ReflectionUtil.ReadMember(
+                        controller,
+                        currFloorMember);
+
+                if (floor == null)
+                    return false;
+
+                Type floorType = floor.GetType();
+
+                if (cachedFloorType != floorType)
+                {
+                    cachedFloorType = floorType;
+
+                    const BindingFlags all =
+                        BindingFlags.Public |
+                        BindingFlags.NonPublic |
+                        BindingFlags.Static |
+                        BindingFlags.Instance;
+
+                    freeroamMember =
+                        ReflectionUtil.FindMember(
+                            floorType,
+                            "freeroam",
+                            all);
+
+                    freeroamGeneratedMember =
+                        ReflectionUtil.FindMember(
+                            floorType,
+                            "freeroamGenerated",
+                            all);
+                }
+
+                bool freeroam = false;
+                bool generated = false;
+
+                object rawFreeroam =
+                    ReflectionUtil.ReadMember(
+                        floor,
+                        freeroamMember);
+
+                if (rawFreeroam is bool)
+                    freeroam = (bool)rawFreeroam;
+
+                object rawGenerated =
+                    ReflectionUtil.ReadMember(
+                        floor,
+                        freeroamGeneratedMember);
+
+                if (rawGenerated is bool)
+                    generated = (bool)rawGenerated;
+
+                return freeroam || generated;
             }
             catch
             {
@@ -3180,7 +3266,7 @@ namespace PracticeStats
 
         public static bool IsAttemptHudVisible()
         {
-            if (!IsGameWorld())
+            if (!IsGameplayWorld())
                 return false;
 
             // PracticeStats can cross a short native pause during fail/retry.
@@ -3394,6 +3480,7 @@ namespace PracticeStats
             winTimeMember = ReflectionUtil.FindMember(controllerType, "winTime", all);
             chosenPlanetMember = ReflectionUtil.FindMember(controllerType, "chosenPlanet", all);
             gameworldMember = ReflectionUtil.FindMember(controllerType, "gameworld", all);
+            currFloorMember = ReflectionUtil.FindMember(controllerType, "currFloor", all);
             pausedMember = ReflectionUtil.FindMember(controllerType, "paused", all);
 
             portalType = ReflectionUtil.FindType("Portal");
