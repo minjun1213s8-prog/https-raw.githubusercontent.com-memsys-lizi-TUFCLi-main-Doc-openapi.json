@@ -128,7 +128,7 @@ namespace PracticeStats
 
                 RGui.Space(8f);
                 RGui.Label("Attempt HUD visibility");
-                bool minus = RGui.Toggle(ShowMinusAttempt, "Show -Attempt");
+                bool minus = RGui.Toggle(ShowMinusAttempt, "Show Attempt-");
                 bool normal = RGui.Toggle(ShowAttempt, "Show Attempt");
                 bool plus = RGui.Toggle(ShowAttemptPlus, "Show Attempt+");
                 if (minus != ShowMinusAttempt || normal != ShowAttempt || plus != ShowAttemptPlus)
@@ -148,7 +148,7 @@ namespace PracticeStats
                         out remaining);
 
                 RGui.Label(
-                    "-Attempt remaining (shared across maps): " +
+                    "Attempt- remaining (shared across maps): " +
                     (remainingConfigured
                         ? remaining.ToString()
                         : "not set"));
@@ -156,7 +156,7 @@ namespace PracticeStats
                 remainingAttemptsText =
                     RGui.TextField(remainingAttemptsText);
 
-                if (RGui.Button("Set shared -Attempt"))
+                if (RGui.Button("Set shared Attempt-"))
                 {
                     int value;
                     if (int.TryParse(
@@ -174,7 +174,7 @@ namespace PracticeStats
                             value.ToString();
 
                         GlobalAttemptTracker.OnRemainingLimitChanged();
-                        status = "Shared -Attempt set to " + value;
+                        status = "Shared Attempt- set to " + value;
                     }
                     else
                     {
@@ -1081,8 +1081,6 @@ namespace PracticeStats
     {
         private const string GlobalKey = "global";
 
-        // Compatibility cache for older builds that stored -Attempt per map.
-        // It is used only once, then collapsed into one global value.
         private static readonly Dictionary<string, int> legacyRemaining =
             new Dictionary<string, int>(
                 StringComparer.OrdinalIgnoreCase);
@@ -1118,13 +1116,13 @@ namespace PracticeStats
             catch (Exception ex)
             {
                 Main.Log(
-                    "-Attempt initialization error: " +
+                    "Attempt- initialization error: " +
                     ex.Message);
             }
         }
 
-        // Kept under the old method name so existing tracker/UI code does not
-        // need special cases. The value is no longer map-specific.
+        // Method name kept for compatibility with the rest of the mod.
+        // The value itself is global, not per-map.
         public static bool TryGetCurrentMapRemaining(
             out int value)
         {
@@ -1135,8 +1133,6 @@ namespace PracticeStats
             return configured;
         }
 
-        // Also intentionally keeps its old name. Setting -Attempt on any map
-        // replaces the single shared balance used by every map.
         public static bool SetCurrentMapRemaining(int value)
         {
             Initialize();
@@ -1179,32 +1175,25 @@ namespace PracticeStats
                 legacyRemaining.Count == 0)
                 return;
 
-            // If an old per-map value exists for the currently open map,
-            // preserve that exact balance when upgrading.
             string currentKey =
                 StableAttemptStore.CurrentMapKey();
 
-            int migrated;
-            if (!string.IsNullOrEmpty(currentKey) &&
-                legacyRemaining.TryGetValue(
-                    currentKey,
-                    out migrated))
-            {
-                configured = true;
-                remaining = migrated;
-                legacyRemaining.Clear();
-                Save();
-                return;
-            }
-
-            // Do not guess while sitting outside a map. Once a map is open and
-            // there is no matching legacy entry, keep the highest old balance
-            // rather than silently throwing away remaining attempts.
             if (string.IsNullOrEmpty(currentKey))
                 return;
 
+            int migrated;
+            if (!legacyRemaining.TryGetValue(
+                    currentKey,
+                    out migrated))
+            {
+                // Old versions could have one value per map. If the currently
+                // opened map has no old entry, preserve the largest remaining
+                // balance rather than discarding the user's budget.
+                migrated = legacyRemaining.Values.Max();
+            }
+
             configured = true;
-            remaining = legacyRemaining.Values.Max();
+            remaining = migrated;
             legacyRemaining.Clear();
             Save();
         }
@@ -1217,7 +1206,6 @@ namespace PracticeStats
                     !File.Exists(path))
                     return false;
 
-                // A zero-byte save is treated as damaged so .bak can recover it.
                 if (new FileInfo(path).Length == 0)
                     return false;
 
@@ -1280,7 +1268,7 @@ namespace PracticeStats
             catch (Exception ex)
             {
                 Main.Log(
-                    "-Attempt load error: " +
+                    "Attempt- load error: " +
                     ex.Message);
 
                 return false;
@@ -1326,7 +1314,7 @@ namespace PracticeStats
             catch (Exception ex)
             {
                 Main.Log(
-                    "-Attempt save error: " +
+                    "Attempt- save error: " +
                     ex.Message);
             }
         }
@@ -1564,6 +1552,7 @@ namespace PracticeStats
         private static bool runCounted;
         private static bool runAuto;
         private static int runStartFloor;
+        private static bool terminalSeen;
 
         public static bool IsLimitBlocked
         {
@@ -1612,9 +1601,12 @@ namespace PracticeStats
                 ResetRunState();
                 ReleaseLimitBlock();
                 startPhaseActive = false;
-                wasGameWorld = true;
+                // Returning to edit/menu mode means the next gameplay entry is
+                // a genuinely new run even if the same controller/map object survives.
+                wasGameWorld = false;
                 lastController = controller;
                 lastMapKey = StableAttemptStore.CurrentMapKey();
+                terminalSeen = false;
                 return;
             }
 
@@ -1646,6 +1638,9 @@ namespace PracticeStats
                 Contains(state, "Fail") ||
                 Contains(state, "Won");
 
+            if (terminal)
+                terminalSeen = true;
+
             if (newContext)
             {
                 ResetRunState();
@@ -1654,16 +1649,25 @@ namespace PracticeStats
                 if (!terminal)
                 {
                     BeginRun();
+                    terminalSeen = false;
                     startPhaseActive = startLike;
                 }
                 else
                 {
+                    terminalSeen = true;
                     startPhaseActive = false;
                 }
             }
             else if (startLike && !startPhaseActive)
             {
-                BeginRun();
+                // Countdown can also occur INSIDE a map after a rest/break.
+                // Only treat it as a new attempt when a real fail/win was seen.
+                if (terminalSeen)
+                {
+                    BeginRun();
+                    terminalSeen = false;
+                }
+
                 startPhaseActive = true;
             }
             else if (!startLike)
@@ -1812,6 +1816,7 @@ namespace PracticeStats
             runCounted = false;
             runAuto = false;
             runStartFloor = 0;
+            terminalSeen = false;
         }
 
         private static void BlockForRemainingLimit()
@@ -1827,7 +1832,7 @@ namespace PracticeStats
             GameBridge.SetPaused(true);
 
             Main.SetStatus(
-                "No -Attempt remaining for this map");
+                "No Attempt- remaining");
         }
 
         private static void KeepLimitBlocked()
@@ -1888,8 +1893,8 @@ namespace PracticeStats
 
             string remainingText =
                 configured
-                    ? "-Attempt " + remaining
-                    : "-Attempt --";
+                    ? "Attempt- " + remaining
+                    : "Attempt- --";
 
             if (GlobalAttemptTracker.IsLimitBlocked)
                 remainingText += "  NO ATTEMPTS LEFT";
@@ -1905,9 +1910,9 @@ namespace PracticeStats
             }
 
             var lines = new List<string>();
-            if (Main.ShowMinusAttempt) lines.Add(remainingText);
             if (Main.ShowAttempt) lines.Add("Attempt " + attempt);
             if (Main.ShowAttemptPlus) lines.Add("Attempt+ " + attemptPlus);
+            if (Main.ShowMinusAttempt) lines.Add(remainingText);
             if (lines.Count == 0)
             {
                 Hide();
