@@ -1,0 +1,30 @@
+name: build-timinglimiter
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'timinglimiter/**'
+      - 'build/**'
+      - 'TimingLimiter.Info.json'
+      - '.github/workflows/build-timinglimiter.yml'
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build
+        run: dotnet build timinglimiter/TimingLimiter.csproj -c Release
+      - name: Package
+        run: |
+          mkdir -p out/TimingLimiter
+          cp timinglimiter/bin/Release/netstandard2.0/TimingLimiter.dll out/TimingLimiter/TimingLimiter.dll
+          cp TimingLimiter.Info.json out/TimingLimiter/Info.json
+          cd out/TimingLimiter && zip -r ../TimingLimiter_0.1.0_UMM_ADOFAI_3.4.0.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TimingLimiter_0.1.0_UMM_ADOFAI_3.4.0
+          path: out/TimingLimiter_0.1.0_UMM_ADOFAI_3.4.0.zip
