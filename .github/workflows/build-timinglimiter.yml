@@ -22,12 +22,19 @@ jobs:
         run: |
           mkdir -p out/TimingLimiter
           cp timinglimiter/bin/Release/netstandard2.0/TimingLimiter.dll out/TimingLimiter/TimingLimiter.dll
-          HARMONY_DLL="$(find "$HOME/.nuget/packages/lib.harmony" -type f -name '0Harmony.dll' | head -n 1)"
+          HARMONY_DLL="$(find "$HOME/.nuget/packages/lib.harmony" -type f -path '*/net48/0Harmony.dll' | head -n 1)"
+          if [ -z "$HARMONY_DLL" ]; then
+            HARMONY_DLL="$(find "$HOME/.nuget/packages/lib.harmony" -type f -path '*/net472/0Harmony.dll' | head -n 1)"
+          fi
+          if [ -z "$HARMONY_DLL" ]; then
+            HARMONY_DLL="$(find "$HOME/.nuget/packages/lib.harmony" -type f -path '*/netstandard2.0/0Harmony.dll' | head -n 1)"
+          fi
           test -n "$HARMONY_DLL"
+          echo "Using Harmony: $HARMONY_DLL"
           cp "$HARMONY_DLL" out/TimingLimiter/0Harmony.dll
           cp TimingLimiter.Info.json out/TimingLimiter/Info.json
-          cd out/TimingLimiter && zip -r ../TimingLimiter_0.1.1_UMM_ADOFAI_Current.zip .
+          cd out/TimingLimiter && zip -r ../TimingLimiter_0.1.2_UMM_ADOFAI_Current.zip .
       - uses: actions/upload-artifact@v4
         with:
-          name: TimingLimiter_0.1.1_UMM_ADOFAI_Current
-          path: out/TimingLimiter_0.1.1_UMM_ADOFAI_Current.zip
+          name: TimingLimiter_0.1.2_UMM_ADOFAI_Current
+          path: out/TimingLimiter_0.1.2_UMM_ADOFAI_Current.zip
