@@ -3,8 +3,8 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using UnityModManagerNet;
 using HarmonyLib;
+using UnityModManagerNet;
 
 namespace TimingLimiter
 {
@@ -15,22 +15,15 @@ namespace TimingLimiter
         private const double TwoPi = Math.PI * 2.0;
 
         private static UnityModManager.ModEntry mod;
+        private static Harmony harmony;
         private static bool enabled = true;
 
         private static double limitMs = 30.0;
         private static string limitText = "30";
         private static string settingsPath;
 
-        private static Harmony harmonyInstance;
-
         [ThreadStatic]
-        private static bool pendingLimitResult;
-
-        [ThreadStatic]
-        private static bool pendingOverLimit;
-
-        [ThreadStatic]
-        private static double pendingSignedMs;
+        private static bool suppressLimiter;
 
         public static bool Load(UnityModManager.ModEntry modEntry)
         {
@@ -42,93 +35,83 @@ namespace TimingLimiter
             modEntry.OnSaveGUI = OnSaveGUI;
             modEntry.OnUnload = OnUnload;
 
-            if (!InstallPatches())
+            bool patched = InstallPatch();
+
+            if (!patched)
             {
-                LogError("Could not install timing patches. TimingLimiter is inactive.");
-                return false;
+                // Stay loaded instead of turning red in UMM. The log contains
+                // exact discovery diagnostics for future game updates.
+                LogError(
+                    "No compatible player Hit method was found. " +
+                    "TimingLimiter is loaded but inactive.");
             }
 
-            Log("TimingLimiter 0.1.2 loaded. Limit: ±" +
-                limitMs.ToString("0.##", CultureInfo.InvariantCulture) + " ms");
+            Log(
+                "TimingLimiter 0.1.3 loaded. Limit: ±" +
+                limitMs.ToString(
+                    "0.##",
+                    CultureInfo.InvariantCulture) +
+                " ms. Patch active=" + patched);
+
             return true;
         }
 
-        private static bool OnToggle(UnityModManager.ModEntry entry, bool value)
+        private static bool OnToggle(
+            UnityModManager.ModEntry entry,
+            bool value)
         {
             enabled = value;
-
-            // Never let a pending hit from before a toggle affect the next one.
-            pendingLimitResult = false;
-            pendingOverLimit = false;
-            pendingSignedMs = 0.0;
-
             return true;
         }
 
-        private static bool OnUnload(UnityModManager.ModEntry entry)
+        private static bool OnUnload(
+            UnityModManager.ModEntry entry)
         {
             enabled = false;
-            pendingLimitResult = false;
 
             try
             {
-                if (harmonyInstance != null)
-                {
-                    MethodInfo unpatchAll =
-                        typeof(Harmony).GetMethod(
-                            "UnpatchAll",
-                            BindingFlags.Public |
-                            BindingFlags.Instance |
-                            BindingFlags.Static);
-
-                    if (unpatchAll != null)
-                    {
-                        ParameterInfo[] p =
-                            unpatchAll.GetParameters();
-
-                        object target =
-                            unpatchAll.IsStatic
-                                ? null
-                                : (object)harmonyInstance;
-
-                        object[] args =
-                            p.Length == 0
-                                ? null
-                                : new object[] { HarmonyId };
-
-                        unpatchAll.Invoke(
-                            target,
-                            args);
-                    }
-                }
+                if (harmony != null)
+                    harmony.UnpatchAll(HarmonyId);
             }
             catch (Exception ex)
             {
                 Log("Unpatch error: " + ex.Message);
             }
 
-            harmonyInstance = null;
+            harmony = null;
             return true;
         }
 
-        private static void OnGUI(UnityModManager.ModEntry entry)
+        private static void OnGUI(
+            UnityModManager.ModEntry entry)
         {
             try
             {
-                RGui.Label("TimingLimiter 0.1.2 - ADOFAI 3.4.0");
-                RGui.Label("Limits accepted manual hits to a custom ±ms range.");
-                RGui.Label("This mod only narrows the game's normal timing window.");
+                RGui.Label(
+                    "TimingLimiter 0.1.3 - current ADOFAI compatibility build");
+                RGui.Label(
+                    "Manual hits outside the configured ±ms range fail.");
                 RGui.Space(8f);
 
                 RGui.Label("Timing limit (±ms)");
-                limitText = RGui.TextField(limitText);
+                limitText =
+                    RGui.TextField(limitText);
 
                 if (RGui.Button("Apply timing limit"))
                 {
                     double parsed;
-                    if (TryParseLimit(limitText, out parsed))
+
+                    if (TryParseLimit(
+                        limitText,
+                        out parsed))
                     {
-                        limitMs = Clamp(parsed, 0.1, 1000.0);
+                        limitMs =
+                            Clamp(
+                                parsed,
+                                0.1,
+                                1000.0);
+
                         limitText =
                             limitMs.ToString(
                                 "0.##",
@@ -136,7 +119,8 @@ namespace TimingLimiter
 
                         SaveSettings();
 
-                        Log("Timing limit changed to ±" +
+                        Log(
+                            "Timing limit changed to ±" +
                             limitText + " ms");
                     }
                     else
@@ -157,7 +141,7 @@ namespace TimingLimiter
                     " ms");
 
                 RGui.Label(
-                    "Autoplay/auto tiles keep ADOFAI's own behavior. No-fail mode remains no-fail.");
+                    "Autoplay, auto tiles, free-roam and midspin-infinite inputs are ignored.");
             }
             catch (Exception ex)
             {
@@ -165,12 +149,21 @@ namespace TimingLimiter
             }
         }
 
-        private static void OnSaveGUI(UnityModManager.ModEntry entry)
+        private static void OnSaveGUI(
+            UnityModManager.ModEntry entry)
         {
             double parsed;
-            if (TryParseLimit(limitText, out parsed))
+
+            if (TryParseLimit(
+                limitText,
+                out parsed))
             {
-                limitMs = Clamp(parsed, 0.1, 1000.0);
+                limitMs =
+                    Clamp(
+                        parsed,
+                        0.1,
+                        1000.0);
+
                 limitText =
                     limitMs.ToString(
                         "0.##",
@@ -180,211 +173,455 @@ namespace TimingLimiter
             SaveSettings();
         }
 
-        // Prefix for scrMisc.GetHitMargin(...).
-        // We calculate the actual input timing error in milliseconds from the
-        // same angle/BPM/pitch values ADOFAI feeds into its judgement function.
-        private static void GetHitMarginPrefix(object[] __args)
+        private static bool InstallPatch()
         {
-            pendingLimitResult = false;
-            pendingOverLimit = false;
-            pendingSignedMs = 0.0;
-
-            if (!enabled ||
-                __args == null ||
-                __args.Length < 5)
-                return;
-
-            // Do not interfere with the game's autoplay mode.
-            if (GameBridge.IsAutoPlay())
-                return;
-
             try
             {
-                double angle =
-                    Convert.ToDouble(
-                        __args[0],
-                        CultureInfo.InvariantCulture);
+                Type playerType =
+                    ReflectionUtil.FindTypeFlexible(
+                        "scrPlayer");
 
-                double targetAngle =
-                    Convert.ToDouble(
-                        __args[1],
-                        CultureInfo.InvariantCulture);
-
-                bool isCW =
-                    Convert.ToBoolean(
-                        __args[2],
-                        CultureInfo.InvariantCulture);
-
-                double bpm =
-                    Convert.ToDouble(
-                        __args[3],
-                        CultureInfo.InvariantCulture);
-
-                double pitch =
-                    Convert.ToDouble(
-                        __args[4],
-                        CultureInfo.InvariantCulture);
-
-                if (bpm <= 0.0 ||
-                    pitch <= 0.0 ||
-                    double.IsNaN(bpm) ||
-                    double.IsInfinity(bpm) ||
-                    double.IsNaN(pitch) ||
-                    double.IsInfinity(pitch))
-                    return;
-
-                double diff =
-                    NormalizeRadians(
-                        angle - targetAngle);
-
-                // Mirror ADOFAI's early/late direction so the sign remains
-                // meaningful even though the limiter itself is symmetric.
-                if (!isCW)
-                    diff = -diff;
-
-                // In ADOFAI, PI radians (180 degrees) is one beat.
-                // beatMs = 60000 / (bpm * pitch)
-                double signedMs =
-                    diff / Pi *
-                    (60000.0 / (bpm * pitch));
-
-                pendingSignedMs = signedMs;
-                pendingOverLimit =
-                    Math.Abs(signedMs) >
-                    limitMs + 0.0001;
-
-                pendingLimitResult = true;
-            }
-            catch
-            {
-                pendingLimitResult = false;
-                pendingOverLimit = false;
-                pendingSignedMs = 0.0;
-            }
-        }
-
-        // Postfix for scrMisc.IsValidHit(HitMargin).
-        // The game decides its normal validity first; we only turn a valid hit
-        // into an invalid one when it exceeds our tighter ±ms limit.
-        private static void IsValidHitPostfix(ref bool __result)
-        {
-            if (!pendingLimitResult)
-                return;
-
-            try
-            {
-                if (enabled &&
-                    pendingOverLimit &&
-                    __result)
+                if (playerType == null)
                 {
-                    __result = false;
-                }
-            }
-            finally
-            {
-                pendingLimitResult = false;
-                pendingOverLimit = false;
-                pendingSignedMs = 0.0;
-            }
-        }
-
-        private static bool InstallPatches()
-        {
-            try
-            {
-                Type scrMiscType =
-                    ReflectionUtil.FindType(
-                        "scrMisc");
-
-                if (scrMiscType == null)
-                {
-                    LogError(
-                        "ADOFAI scrMisc was not found. The game may have changed.");
+                    LogTypeHints("player");
                     return false;
                 }
 
-                MethodInfo getHitMargin =
-                    scrMiscType
-                        .GetMethods(
-                            BindingFlags.Public |
-                            BindingFlags.NonPublic |
-                            BindingFlags.Static)
-                        .Where(m =>
-                            m.Name == "GetHitMargin")
-                        .OrderByDescending(m =>
-                            m.GetParameters().Length)
-                        .FirstOrDefault(m =>
-                            m.GetParameters().Length >= 5);
+                MethodInfo[] hitCandidates =
+                    playerType.GetMethods(
+                        BindingFlags.Public |
+                        BindingFlags.NonPublic |
+                        BindingFlags.Instance)
+                    .Where(m =>
+                        m.Name == "Hit" &&
+                        m.ReturnType == typeof(bool))
+                    .ToArray();
 
-                MethodInfo isValidHit =
-                    scrMiscType
-                        .GetMethods(
-                            BindingFlags.Public |
-                            BindingFlags.NonPublic |
-                            BindingFlags.Static)
-                        .FirstOrDefault(m =>
-                            m.Name == "IsValidHit" &&
-                            m.ReturnType == typeof(bool));
+                MethodInfo hitMethod =
+                    hitCandidates.FirstOrDefault(m =>
+                    {
+                        ParameterInfo[] p =
+                            m.GetParameters();
 
-                if (getHitMargin == null ||
-                    isValidHit == null)
+                        return p.Length == 1 &&
+                               p[0].ParameterType ==
+                                   typeof(bool);
+                    });
+
+                if (hitMethod == null)
                 {
                     LogError(
-                        "ADOFAI judgement methods were not found. " +
-                        "GetHitMargin=" + (getHitMargin != null) +
-                        ", IsValidHit=" + (isValidHit != null));
+                        "scrPlayer found as " +
+                        playerType.FullName +
+                        " but compatible Hit(bool) was not found. Candidates: " +
+                        string.Join(
+                            ", ",
+                            hitCandidates.Select(
+                                DescribeMethod)
+                            .ToArray()));
+
                     return false;
                 }
 
-                harmonyInstance =
+                harmony =
                     new Harmony(HarmonyId);
 
-                MethodInfo prefixMethod =
+                MethodInfo prefix =
                     typeof(Main).GetMethod(
-                        "GetHitMarginPrefix",
+                        "HitPrefix",
                         BindingFlags.NonPublic |
                         BindingFlags.Static);
 
-                MethodInfo postfixMethod =
-                    typeof(Main).GetMethod(
-                        "IsValidHitPostfix",
-                        BindingFlags.NonPublic |
-                        BindingFlags.Static);
-
-                harmonyInstance.Patch(
-                    getHitMargin,
+                harmony.Patch(
+                    hitMethod,
                     prefix:
-                        new HarmonyMethod(
-                            prefixMethod));
-
-                harmonyInstance.Patch(
-                    isValidHit,
-                    postfix:
-                        new HarmonyMethod(
-                            postfixMethod));
+                        new HarmonyMethod(prefix));
 
                 Log(
                     "Patched " +
-                    getHitMargin.DeclaringType.FullName +
+                    playerType.FullName +
                     "." +
-                    getHitMargin.Name +
-                    " and " +
-                    isValidHit.DeclaringType.FullName +
-                    "." +
-                    isValidHit.Name);
+                    DescribeMethod(hitMethod));
 
                 return true;
             }
             catch (Exception ex)
             {
                 LogError(
-                    "Patch installation error: " +
+                    "Hit patch installation error: " +
                     ex);
                 return false;
             }
         }
 
-        private static double NormalizeRadians(double value)
+        // Returns false to skip the original Hit only when TimingLimiter
+        // intentionally rejects the manual input.
+        private static bool HitPrefix(
+            object __instance,
+            object[] __args,
+            ref bool __result)
+        {
+            if (!enabled ||
+                suppressLimiter ||
+                __instance == null)
+                return true;
+
+            bool isAuto =
+                __args != null &&
+                __args.Length > 0 &&
+                __args[0] is bool &&
+                (bool)__args[0];
+
+            if (isAuto ||
+                GameBridge.IsAutoPlay())
+                return true;
+
+            try
+            {
+                double signedMs;
+                string skipReason;
+
+                if (!TryCalculateHitMs(
+                    __instance,
+                    out signedMs,
+                    out skipReason))
+                {
+                    return true;
+                }
+
+                if (Math.Abs(signedMs) <=
+                    limitMs + 0.0001)
+                    return true;
+
+                suppressLimiter = true;
+
+                try
+                {
+                    InvokeDeath(
+                        __instance,
+                        signedMs);
+                }
+                finally
+                {
+                    suppressLimiter = false;
+                }
+
+                __result = false;
+
+                Log(
+                    "Rejected hit: " +
+                    signedMs.ToString(
+                        "+0.00;-0.00;0.00",
+                        CultureInfo.InvariantCulture) +
+                    " ms (limit ±" +
+                    limitMs.ToString(
+                        "0.##",
+                        CultureInfo.InvariantCulture) +
+                    " ms)");
+
+                return false;
+            }
+            catch (Exception ex)
+            {
+                // Never break normal gameplay if a future update changes a
+                // member. The limiter simply allows that hit and logs it.
+                Log(
+                    "Hit evaluation error: " +
+                    ex.Message);
+
+                return true;
+            }
+        }
+
+        private static bool TryCalculateHitMs(
+            object player,
+            out double signedMs,
+            out string skipReason)
+        {
+            signedMs = 0.0;
+            skipReason = null;
+
+            object planetarySystem =
+                ReflectionUtil.ReadNamed(
+                    player,
+                    "planetarySystem");
+
+            if (planetarySystem == null)
+            {
+                skipReason = "planetarySystem";
+                return false;
+            }
+
+            object chosenPlanet =
+                ReflectionUtil.ReadNamed(
+                    planetarySystem,
+                    "chosenPlanet");
+
+            if (chosenPlanet == null)
+            {
+                skipReason = "chosenPlanet";
+                return false;
+            }
+
+            object currentFloor =
+                ReflectionUtil.ReadNamed(
+                    chosenPlanet,
+                    "currfloor");
+
+            if (currentFloor == null)
+            {
+                skipReason = "currfloor";
+                return false;
+            }
+
+            if (ReflectionUtil.ReadBool(
+                    currentFloor,
+                    "freeroam",
+                    false) ||
+                ReflectionUtil.ReadBool(
+                    currentFloor,
+                    "freeroamGenerated",
+                    false))
+            {
+                skipReason = "freeroam";
+                return false;
+            }
+
+            if (ReflectionUtil.ReadBool(
+                    player,
+                    "midspinInfiniteMargin",
+                    false))
+            {
+                skipReason = "midspinInfiniteMargin";
+                return false;
+            }
+
+            object nextFloor =
+                ReflectionUtil.ReadNamed(
+                    currentFloor,
+                    "nextfloor");
+
+            if (nextFloor != null &&
+                ReflectionUtil.ReadBool(
+                    nextFloor,
+                    "auto",
+                    false))
+            {
+                skipReason = "auto tile";
+                return false;
+            }
+
+            double angle;
+            double targetAngle;
+            double speed;
+
+            if (!ReflectionUtil.TryReadDouble(
+                    chosenPlanet,
+                    "angle",
+                    out angle) ||
+                !ReflectionUtil.TryReadDouble(
+                    chosenPlanet,
+                    "targetExitAngle",
+                    out targetAngle) ||
+                !ReflectionUtil.TryReadDouble(
+                    planetarySystem,
+                    "speed",
+                    out speed))
+            {
+                skipReason = "angle/speed";
+                return false;
+            }
+
+            bool isCW =
+                ReflectionUtil.ReadBool(
+                    planetarySystem,
+                    "isCW",
+                    true);
+
+            object conductor =
+                GameBridge.GetConductor();
+
+            if (conductor == null)
+            {
+                skipReason = "conductor";
+                return false;
+            }
+
+            double bpm;
+
+            if (!ReflectionUtil.TryReadDouble(
+                    conductor,
+                    "bpm",
+                    out bpm))
+            {
+                skipReason = "bpm";
+                return false;
+            }
+
+            double pitch = 1.0;
+
+            object song =
+                ReflectionUtil.ReadNamed(
+                    conductor,
+                    "song");
+
+            double songPitch;
+
+            if (song != null &&
+                ReflectionUtil.TryReadDouble(
+                    song,
+                    "pitch",
+                    out songPitch))
+            {
+                pitch = songPitch;
+            }
+
+            if (bpm <= 0.0 ||
+                speed <= 0.0 ||
+                pitch <= 0.0)
+            {
+                skipReason = "invalid tempo";
+                return false;
+            }
+
+            double diff =
+                NormalizeRadians(
+                    angle - targetAngle);
+
+            if (!isCW)
+                diff = -diff;
+
+            // ADOFAI rotates PI radians (180 degrees) per beat.
+            // Effective beat time includes planetary speed and song pitch.
+            signedMs =
+                diff / Pi *
+                (60000.0 /
+                    (bpm * speed * pitch));
+
+            if (double.IsNaN(signedMs) ||
+                double.IsInfinity(signedMs))
+            {
+                skipReason = "invalid result";
+                return false;
+            }
+
+            return true;
+        }
+
+        private static void InvokeDeath(
+            object player,
+            double signedMs)
+        {
+            MethodInfo die =
+                player.GetType()
+                    .GetMethods(
+                        BindingFlags.Public |
+                        BindingFlags.NonPublic |
+                        BindingFlags.Instance)
+                    .Where(m =>
+                        m.Name == "Die")
+                    .OrderBy(m =>
+                        m.GetParameters().Length)
+                    .FirstOrDefault();
+
+            if (die == null)
+            {
+                LogError(
+                    "Timing violation detected but scrPlayer.Die was not found.");
+                return;
+            }
+
+            ParameterInfo[] p =
+                die.GetParameters();
+
+            object[] args =
+                new object[p.Length];
+
+            string message =
+                "TimingLimiter: " +
+                signedMs.ToString(
+                    "+0.00;-0.00;0.00",
+                    CultureInfo.InvariantCulture) +
+                "ms / ±" +
+                limitMs.ToString(
+                    "0.##",
+                    CultureInfo.InvariantCulture) +
+                "ms";
+
+            for (int i = 0;
+                 i < p.Length;
+                 i++)
+            {
+                if (string.Equals(
+                    p[i].Name,
+                    "failMessage",
+                    StringComparison.OrdinalIgnoreCase) &&
+                    p[i].ParameterType ==
+                        typeof(string))
+                {
+                    args[i] = message;
+                }
+                else if (p[i].HasDefaultValue)
+                {
+                    args[i] =
+                        p[i].DefaultValue;
+                }
+                else
+                {
+                    args[i] =
+                        ReflectionUtil.DefaultValue(
+                            p[i].ParameterType);
+                }
+            }
+
+            die.Invoke(
+                player,
+                args);
+        }
+
+        private static void LogTypeHints(string token)
+        {
+            try
+            {
+                string[] matches =
+                    ReflectionUtil.FindTypeNamesContaining(
+                        token,
+                        24);
+
+                LogError(
+                    "Could not find scrPlayer. Loaded type hints containing '" +
+                    token + "': " +
+                    (matches.Length == 0
+                        ? "(none)"
+                        : string.Join(", ", matches)));
+            }
+            catch (Exception ex)
+            {
+                LogError(
+                    "Type diagnostic error: " +
+                    ex.Message);
+            }
+        }
+
+        private static string DescribeMethod(
+            MethodInfo method)
+        {
+            if (method == null)
+                return "(null)";
+
+            return method.Name +
+                "(" +
+                string.Join(
+                    ",",
+                    method.GetParameters()
+                        .Select(p =>
+                            p.ParameterType.Name)
+                        .ToArray()) +
+                ")";
+        }
+
+        private static double NormalizeRadians(
+            double value)
         {
             while (value > Pi)
                 value -= TwoPi;
@@ -455,14 +692,20 @@ namespace TimingLimiter
                         continue;
 
                     int eq = raw.IndexOf('=');
+
                     if (eq <= 0)
                         continue;
 
                     string key =
-                        raw.Substring(0, eq).Trim();
+                        raw.Substring(
+                            0,
+                            eq)
+                        .Trim();
 
                     string valueText =
-                        raw.Substring(eq + 1).Trim();
+                        raw.Substring(
+                            eq + 1)
+                        .Trim();
 
                     if (!key.Equals(
                         "LimitMs",
@@ -470,6 +713,7 @@ namespace TimingLimiter
                         continue;
 
                     double parsed;
+
                     if (TryParseLimit(
                         valueText,
                         out parsed))
@@ -499,7 +743,8 @@ namespace TimingLimiter
         {
             try
             {
-                if (string.IsNullOrEmpty(settingsPath))
+                if (string.IsNullOrEmpty(
+                    settingsPath))
                     return;
 
                 string temp =
@@ -518,7 +763,9 @@ namespace TimingLimiter
                 if (File.Exists(settingsPath))
                     File.Delete(settingsPath);
 
-                File.Move(temp, settingsPath);
+                File.Move(
+                    temp,
+                    settingsPath);
             }
             catch (Exception ex)
             {
@@ -534,22 +781,27 @@ namespace TimingLimiter
             {
                 if (mod != null &&
                     mod.Logger != null)
+                {
                     mod.Logger.Log(
                         "[TimingLimiter] " +
                         message);
+                }
             }
             catch { }
         }
 
-        private static void LogError(string message)
+        private static void LogError(
+            string message)
         {
             try
             {
                 if (mod != null &&
                     mod.Logger != null)
+                {
                     mod.Logger.Error(
                         "[TimingLimiter] " +
                         message);
+                }
             }
             catch { }
         }
@@ -559,15 +811,18 @@ namespace TimingLimiter
     {
         private static Type rdcType;
         private static MemberInfo autoMember;
+
+        private static Type adoBaseType;
+        private static MemberInfo conductorMember;
+
+        private static Type conductorType;
+        private static MemberInfo conductorInstanceMember;
+
         private static bool resolved;
 
         public static bool IsAutoPlay()
         {
             Resolve();
-
-            if (rdcType == null ||
-                autoMember == null)
-                return false;
 
             try
             {
@@ -585,16 +840,38 @@ namespace TimingLimiter
             }
         }
 
+        public static object GetConductor()
+        {
+            Resolve();
+
+            try
+            {
+                object conductor =
+                    ReflectionUtil.ReadMember(
+                        null,
+                        conductorMember);
+
+                if (conductor != null)
+                    return conductor;
+            }
+            catch { }
+
+            try
+            {
+                return ReflectionUtil.ReadMember(
+                    null,
+                    conductorInstanceMember);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         private static void Resolve()
         {
             if (resolved) return;
             resolved = true;
-
-            rdcType =
-                ReflectionUtil.FindType("RDC");
-
-            if (rdcType == null)
-                return;
 
             const BindingFlags all =
                 BindingFlags.Public |
@@ -602,10 +879,34 @@ namespace TimingLimiter
                 BindingFlags.Static |
                 BindingFlags.Instance;
 
+            rdcType =
+                ReflectionUtil.FindTypeFlexible(
+                    "RDC");
+
             autoMember =
                 ReflectionUtil.FindMember(
                     rdcType,
                     "auto",
+                    all);
+
+            adoBaseType =
+                ReflectionUtil.FindTypeFlexible(
+                    "ADOBase");
+
+            conductorMember =
+                ReflectionUtil.FindMember(
+                    adoBaseType,
+                    "conductor",
+                    all);
+
+            conductorType =
+                ReflectionUtil.FindTypeFlexible(
+                    "scrConductor");
+
+            conductorInstanceMember =
+                ReflectionUtil.FindMember(
+                    conductorType,
+                    "instance",
                     all);
         }
     }
@@ -637,7 +938,8 @@ namespace TimingLimiter
                     });
         }
 
-        public static string TextField(string text)
+        public static string TextField(
+            string text)
         {
             Resolve();
 
@@ -653,10 +955,12 @@ namespace TimingLimiter
                         noOptions
                     });
 
-            return result as string ?? text;
+            return result as string ??
+                   text;
         }
 
-        public static bool Button(string text)
+        public static bool Button(
+            string text)
         {
             Resolve();
 
@@ -676,14 +980,18 @@ namespace TimingLimiter
                    (bool)result;
         }
 
-        public static void Space(float pixels)
+        public static void Space(
+            float pixels)
         {
             Resolve();
 
             if (space != null)
                 space.Invoke(
                     null,
-                    new object[] { pixels });
+                    new object[]
+                    {
+                        pixels
+                    });
         }
 
         private static void Resolve()
@@ -730,7 +1038,8 @@ namespace TimingLimiter
                         "TextField",
                         typeof(string),
                         optionType.MakeArrayType()) &&
-                    m.ReturnType == typeof(string));
+                    m.ReturnType ==
+                        typeof(string));
 
             button =
                 methods.FirstOrDefault(m =>
@@ -739,7 +1048,8 @@ namespace TimingLimiter
                         "Button",
                         typeof(string),
                         optionType.MakeArrayType()) &&
-                    m.ReturnType == typeof(bool));
+                    m.ReturnType ==
+                        typeof(bool));
 
             space =
                 methods.FirstOrDefault(m =>
@@ -768,7 +1078,8 @@ namespace TimingLimiter
                  i < parameters.Length;
                  i++)
             {
-                if (parameters[i].ParameterType !=
+                if (parameters[i]
+                        .ParameterType !=
                     types[i])
                     return false;
             }
@@ -779,25 +1090,77 @@ namespace TimingLimiter
 
     internal static class ReflectionUtil
     {
-        public static Type FindType(string name)
+        public static Type FindTypeFlexible(
+            string name)
         {
             foreach (Assembly assembly in
-                AppDomain.CurrentDomain.GetAssemblies())
+                AppDomain.CurrentDomain
+                    .GetAssemblies())
             {
                 try
                 {
-                    Type type =
+                    Type exact =
                         assembly.GetType(
                             name,
                             false);
 
-                    if (type != null)
-                        return type;
+                    if (exact != null)
+                        return exact;
                 }
                 catch { }
+
+                foreach (Type type in
+                    SafeGetTypes(assembly))
+                {
+                    if (type == null)
+                        continue;
+
+                    if (string.Equals(
+                        type.Name,
+                        name,
+                        StringComparison.Ordinal) ||
+                        string.Equals(
+                        type.FullName,
+                        name,
+                        StringComparison.Ordinal) ||
+                        (type.FullName != null &&
+                         type.FullName.EndsWith(
+                             "." + name,
+                             StringComparison.Ordinal)))
+                    {
+                        return type;
+                    }
+                }
             }
 
             return null;
+        }
+
+        public static string[]
+            FindTypeNamesContaining(
+                string token,
+                int max)
+        {
+            return AppDomain.CurrentDomain
+                .GetAssemblies()
+                .SelectMany(
+                    SafeGetTypes)
+                .Where(t =>
+                    t != null &&
+                    ((t.Name != null &&
+                      t.Name.IndexOf(
+                          token,
+                          StringComparison.OrdinalIgnoreCase) >= 0) ||
+                     (t.FullName != null &&
+                      t.FullName.IndexOf(
+                          token,
+                          StringComparison.OrdinalIgnoreCase) >= 0)))
+                .Select(t =>
+                    t.FullName ??
+                    t.Name)
+                .Distinct()
+                .Take(max)
+                .ToArray();
         }
 
         public static MemberInfo FindMember(
@@ -830,10 +1193,35 @@ namespace TimingLimiter
                 if (property != null)
                     return property;
 
-                current = current.BaseType;
+                current =
+                    current.BaseType;
             }
 
             return null;
+        }
+
+        public static object ReadNamed(
+            object instance,
+            string name)
+        {
+            if (instance == null)
+                return null;
+
+            const BindingFlags all =
+                BindingFlags.Public |
+                BindingFlags.NonPublic |
+                BindingFlags.Static |
+                BindingFlags.Instance;
+
+            MemberInfo member =
+                FindMember(
+                    instance.GetType(),
+                    name,
+                    all);
+
+            return ReadMember(
+                instance,
+                member);
         }
 
         public static object ReadMember(
@@ -847,17 +1235,112 @@ namespace TimingLimiter
                 member as FieldInfo;
 
             if (field != null)
-                return field.GetValue(instance);
+                return field.GetValue(
+                    field.IsStatic
+                        ? null
+                        : instance);
 
             PropertyInfo property =
                 member as PropertyInfo;
 
             if (property != null)
+            {
+                MethodInfo getter =
+                    property.GetGetMethod(true);
+
                 return property.GetValue(
-                    instance,
+                    getter != null &&
+                    getter.IsStatic
+                        ? null
+                        : instance,
                     null);
+            }
 
             return null;
+        }
+
+        public static bool ReadBool(
+            object instance,
+            string name,
+            bool fallback)
+        {
+            try
+            {
+                object value =
+                    ReadNamed(
+                        instance,
+                        name);
+
+                return value is bool
+                    ? (bool)value
+                    : fallback;
+            }
+            catch
+            {
+                return fallback;
+            }
+        }
+
+        public static bool TryReadDouble(
+            object instance,
+            string name,
+            out double value)
+        {
+            value = 0.0;
+
+            try
+            {
+                object raw =
+                    ReadNamed(
+                        instance,
+                        name);
+
+                if (raw == null)
+                    return false;
+
+                value =
+                    Convert.ToDouble(
+                        raw,
+                        CultureInfo.InvariantCulture);
+
+                return !double.IsNaN(value) &&
+                       !double.IsInfinity(value);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static object DefaultValue(
+            Type type)
+        {
+            if (type == null ||
+                !type.IsValueType)
+                return null;
+
+            return Activator.CreateInstance(
+                type);
+        }
+
+        private static Type[] SafeGetTypes(
+            Assembly assembly)
+        {
+            try
+            {
+                return assembly.GetTypes();
+            }
+            catch (
+                ReflectionTypeLoadException ex)
+            {
+                return ex.Types
+                    .Where(t => t != null)
+                    .ToArray();
+            }
+            catch
+            {
+                return new Type[0];
+            }
         }
     }
 }
