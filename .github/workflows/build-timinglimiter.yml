@@ -22,7 +22,9 @@ jobs:
         run: |
           mkdir -p out/TimingLimiter
           cp timinglimiter/bin/Release/netstandard2.0/TimingLimiter.dll out/TimingLimiter/TimingLimiter.dll
-          cp timinglimiter/bin/Release/netstandard2.0/0Harmony.dll out/TimingLimiter/0Harmony.dll
+          HARMONY_DLL="$(find "$HOME/.nuget/packages/lib.harmony" -type f -name '0Harmony.dll' | head -n 1)"
+          test -n "$HARMONY_DLL"
+          cp "$HARMONY_DLL" out/TimingLimiter/0Harmony.dll
           cp TimingLimiter.Info.json out/TimingLimiter/Info.json
           cd out/TimingLimiter && zip -r ../TimingLimiter_0.1.1_UMM_ADOFAI_Current.zip .
       - uses: actions/upload-artifact@v4
