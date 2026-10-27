@@ -3,10 +3,10 @@
     <TargetFramework>netstandard2.0</TargetFramework>
     <AssemblyName>TimingLimiter</AssemblyName>
     <RootNamespace>TimingLimiter</RootNamespace>
-    <Version>0.1.5</Version>
-    <AssemblyVersion>0.1.5.0</AssemblyVersion>
-    <FileVersion>0.1.5.0</FileVersion>
-    <InformationalVersion>0.1.5</InformationalVersion>
+    <Version>0.1.6</Version>
+    <AssemblyVersion>0.1.6.0</AssemblyVersion>
+    <FileVersion>0.1.6.0</FileVersion>
+    <InformationalVersion>0.1.6</InformationalVersion>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
