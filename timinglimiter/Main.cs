@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using UnityModManagerNet;
+using HarmonyLib;
 
 namespace TimingLimiter
 {
@@ -20,8 +21,7 @@ namespace TimingLimiter
         private static string limitText = "30";
         private static string settingsPath;
 
-        private static object harmonyInstance;
-        private static MethodInfo harmonyUnpatchSelf;
+        private static Harmony harmonyInstance;
 
         [ThreadStatic]
         private static bool pendingLimitResult;
@@ -48,7 +48,7 @@ namespace TimingLimiter
                 return false;
             }
 
-            Log("TimingLimiter 0.1.0 loaded. Limit: ±" +
+            Log("TimingLimiter 0.1.1 loaded. Limit: ±" +
                 limitMs.ToString("0.##", CultureInfo.InvariantCulture) + " ms");
             return true;
         }
@@ -72,13 +72,8 @@ namespace TimingLimiter
 
             try
             {
-                if (harmonyInstance != null &&
-                    harmonyUnpatchSelf != null)
-                {
-                    harmonyUnpatchSelf.Invoke(
-                        harmonyInstance,
-                        null);
-                }
+                if (harmonyInstance != null)
+                    harmonyInstance.UnpatchSelf();
             }
             catch (Exception ex)
             {
@@ -93,7 +88,7 @@ namespace TimingLimiter
         {
             try
             {
-                RGui.Label("TimingLimiter 0.1.0 - ADOFAI 3.4.0");
+                RGui.Label("TimingLimiter 0.1.1 - ADOFAI 3.4.0");
                 RGui.Label("Limits accepted manual hits to a custom ±ms range.");
                 RGui.Label("This mod only narrows the game's normal timing window.");
                 RGui.Space(8f);
@@ -270,34 +265,16 @@ namespace TimingLimiter
         {
             try
             {
-                Type harmonyType =
-                    ReflectionUtil.FindType(
-                        "HarmonyLib.Harmony");
-
-                Type harmonyMethodType =
-                    ReflectionUtil.FindType(
-                        "HarmonyLib.HarmonyMethod");
-
                 Type scrMiscType =
                     ReflectionUtil.FindType(
                         "scrMisc");
 
-                if (harmonyType == null ||
-                    harmonyMethodType == null ||
-                    scrMiscType == null)
+                if (scrMiscType == null)
                 {
                     LogError(
-                        "Harmony or scrMisc was not found.");
+                        "ADOFAI scrMisc was not found. The game may have changed.");
                     return false;
                 }
-
-                harmonyInstance =
-                    Activator.CreateInstance(
-                        harmonyType,
-                        new object[] { HarmonyId });
-
-                if (harmonyInstance == null)
-                    return false;
 
                 MethodInfo getHitMargin =
                     scrMiscType
@@ -326,29 +303,14 @@ namespace TimingLimiter
                     isValidHit == null)
                 {
                     LogError(
-                        "Required ADOFAI judgement methods were not found.");
+                        "ADOFAI judgement methods were not found. " +
+                        "GetHitMargin=" + (getHitMargin != null) +
+                        ", IsValidHit=" + (isValidHit != null));
                     return false;
                 }
 
-                ConstructorInfo harmonyMethodCtor =
-                    harmonyMethodType
-                        .GetConstructors()
-                        .FirstOrDefault(c =>
-                        {
-                            ParameterInfo[] p =
-                                c.GetParameters();
-
-                            return p.Length == 1 &&
-                                   p[0].ParameterType ==
-                                       typeof(MethodInfo);
-                        });
-
-                if (harmonyMethodCtor == null)
-                {
-                    LogError(
-                        "HarmonyMethod(MethodInfo) constructor was not found.");
-                    return false;
-                }
+                harmonyInstance =
+                    new Harmony(HarmonyId);
 
                 MethodInfo prefixMethod =
                     typeof(Main).GetMethod(
@@ -362,58 +324,27 @@ namespace TimingLimiter
                         BindingFlags.NonPublic |
                         BindingFlags.Static);
 
-                object prefix =
-                    harmonyMethodCtor.Invoke(
-                        new object[] { prefixMethod });
-
-                object postfix =
-                    harmonyMethodCtor.Invoke(
-                        new object[] { postfixMethod });
-
-                MethodInfo patchMethod =
-                    harmonyType
-                        .GetMethods(
-                            BindingFlags.Public |
-                            BindingFlags.Instance)
-                        .Where(m => m.Name == "Patch")
-                        .FirstOrDefault(m =>
-                        {
-                            ParameterInfo[] p =
-                                m.GetParameters();
-
-                            return p.Length >= 3 &&
-                                   typeof(MethodBase)
-                                       .IsAssignableFrom(
-                                           p[0].ParameterType);
-                        });
-
-                if (patchMethod == null)
-                {
-                    LogError(
-                        "Harmony.Patch was not found.");
-                    return false;
-                }
-
-                InvokePatch(
-                    patchMethod,
+                harmonyInstance.Patch(
                     getHitMargin,
-                    prefix,
-                    null);
+                    prefix:
+                        new HarmonyMethod(
+                            prefixMethod));
 
-                InvokePatch(
-                    patchMethod,
+                harmonyInstance.Patch(
                     isValidHit,
-                    null,
-                    postfix);
+                    postfix:
+                        new HarmonyMethod(
+                            postfixMethod));
 
-                harmonyUnpatchSelf =
-                    harmonyType.GetMethod(
-                        "UnpatchSelf",
-                        BindingFlags.Public |
-                        BindingFlags.Instance,
-                        null,
-                        Type.EmptyTypes,
-                        null);
+                Log(
+                    "Patched " +
+                    getHitMargin.DeclaringType.FullName +
+                    "." +
+                    getHitMargin.Name +
+                    " and " +
+                    isValidHit.DeclaringType.FullName +
+                    "." +
+                    isValidHit.Name);
 
                 return true;
             }
@@ -424,42 +355,6 @@ namespace TimingLimiter
                     ex);
                 return false;
             }
-        }
-
-        private static void InvokePatch(
-            MethodInfo patchMethod,
-            MethodBase target,
-            object prefix,
-            object postfix)
-        {
-            ParameterInfo[] parameters =
-                patchMethod.GetParameters();
-
-            object[] args =
-                new object[parameters.Length];
-
-            args[0] = target;
-
-            for (int i = 1; i < args.Length; i++)
-            {
-                string name =
-                    parameters[i].Name ?? "";
-
-                if (name.Equals(
-                    "prefix",
-                    StringComparison.OrdinalIgnoreCase))
-                    args[i] = prefix;
-                else if (name.Equals(
-                    "postfix",
-                    StringComparison.OrdinalIgnoreCase))
-                    args[i] = postfix;
-                else
-                    args[i] = null;
-            }
-
-            patchMethod.Invoke(
-                harmonyInstance,
-                args);
         }
 
         private static double NormalizeRadians(double value)
