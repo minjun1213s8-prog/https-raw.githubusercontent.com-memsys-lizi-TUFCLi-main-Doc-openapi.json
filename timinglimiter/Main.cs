@@ -47,7 +47,7 @@ namespace TimingLimiter
             }
 
             Log(
-                "TimingLimiter 0.1.5 loaded. Limit: ±" +
+                "TimingLimiter 0.1.6 loaded. Limit: ±" +
                 limitMs.ToString(
                     "0.##",
                     CultureInfo.InvariantCulture) +
@@ -89,7 +89,7 @@ namespace TimingLimiter
             try
             {
                 RGui.Label(
-                    "TimingLimiter 0.1.5 - current ADOFAI compatibility build");
+                    "TimingLimiter 0.1.6 - current ADOFAI compatibility build");
                 RGui.Label(
                     "Manual hits outside the configured ±ms range fail.");
                 RGui.Space(8f);
@@ -141,7 +141,7 @@ namespace TimingLimiter
                     " ms");
 
                 RGui.Label(
-                    "Autoplay, auto tiles, free-roam and midspin-infinite inputs are ignored.");
+                    "Autoplay, auto tiles, free-roam movement, puzzle movement and midspin-infinite inputs are ignored.");
             }
             catch (Exception ex)
             {
@@ -283,6 +283,12 @@ namespace TimingLimiter
                 GameBridge.IsAutoPlay())
                 return true;
 
+            // Free-roam/puzzle movement also reaches scrPlayer.Hit in current
+            // ADOFAI builds. TimingLimiter must never judge those movement
+            // inputs as rhythm hits.
+            if (!GameBridge.IsStrictRhythmGameplay(__instance))
+                return true;
+
             try
             {
                 double signedMs;
@@ -400,6 +406,25 @@ namespace TimingLimiter
                     false))
             {
                 skipReason = "freeroam";
+                return false;
+            }
+
+            object transitionFloor =
+                ReflectionUtil.ReadNamed(
+                    currentFloor,
+                    "nextfloor");
+
+            if (transitionFloor != null &&
+                (ReflectionUtil.ReadBool(
+                    transitionFloor,
+                    "freeroam",
+                    false) ||
+                 ReflectionUtil.ReadBool(
+                    transitionFloor,
+                    "freeroamGenerated",
+                    false)))
+            {
+                skipReason = "entering freeroam";
                 return false;
             }
 
@@ -876,6 +901,99 @@ namespace TimingLimiter
             {
                 return false;
             }
+        }
+
+        public static bool IsStrictRhythmGameplay(
+            object player)
+        {
+            object controller =
+                GetController();
+
+            if (controller == null)
+                return false;
+
+            try
+            {
+                // ADOFAI's free-roam mode can still dispatch Hit() calls while
+                // controller.gameworld is false. Only ordinary rhythm gameplay
+                // is eligible for the timing limiter.
+                object gameworldRaw =
+                    ReflectionUtil.ReadNamed(
+                        controller,
+                        "gameworld");
+
+                if (gameworldRaw is bool &&
+                    !(bool)gameworldRaw)
+                    return false;
+
+                if (ReflectionUtil.ReadBool(
+                        controller,
+                        "isPuzzleRoom",
+                        false))
+                    return false;
+
+                object controllerFloor =
+                    ReflectionUtil.ReadNamed(
+                        controller,
+                        "currFloor");
+
+                if (IsFreeRoamFloor(
+                    controllerFloor))
+                    return false;
+
+                object planetarySystem =
+                    ReflectionUtil.ReadNamed(
+                        player,
+                        "planetarySystem");
+
+                object chosenPlanet =
+                    ReflectionUtil.ReadNamed(
+                        planetarySystem,
+                        "chosenPlanet");
+
+                object playerFloor =
+                    ReflectionUtil.ReadNamed(
+                        chosenPlanet,
+                        "currfloor");
+
+                if (IsFreeRoamFloor(
+                    playerFloor))
+                    return false;
+
+                object nextFloor =
+                    ReflectionUtil.ReadNamed(
+                        playerFloor,
+                        "nextfloor");
+
+                if (IsFreeRoamFloor(
+                    nextFloor))
+                    return false;
+
+                return true;
+            }
+            catch
+            {
+                // If the current game's mode cannot be identified safely,
+                // do not risk killing the player for a movement input.
+                return false;
+            }
+        }
+
+        private static bool IsFreeRoamFloor(
+            object floor)
+        {
+            if (floor == null)
+                return false;
+
+            return
+                ReflectionUtil.ReadBool(
+                    floor,
+                    "freeroam",
+                    false) ||
+                ReflectionUtil.ReadBool(
+                    floor,
+                    "freeroamGenerated",
+                    false);
         }
 
         public static object GetConductor()
