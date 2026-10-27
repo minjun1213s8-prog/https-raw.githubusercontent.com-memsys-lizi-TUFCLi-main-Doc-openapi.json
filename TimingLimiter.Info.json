@@ -2,7 +2,7 @@
   "Id": "TimingLimiter",
   "DisplayName": "TimingLimiter",
   "Author": "Wonerd",
-  "Version": "0.1.5",
+  "Version": "0.1.6",
   "AssemblyName": "TimingLimiter.dll",
   "EntryMethod": "TimingLimiter.Main.Load"
 }
