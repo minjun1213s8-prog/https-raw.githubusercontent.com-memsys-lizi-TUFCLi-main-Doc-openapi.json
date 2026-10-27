@@ -48,7 +48,7 @@ namespace TimingLimiter
                 return false;
             }
 
-            Log("TimingLimiter 0.1.1 loaded. Limit: ±" +
+            Log("TimingLimiter 0.1.2 loaded. Limit: ±" +
                 limitMs.ToString("0.##", CultureInfo.InvariantCulture) + " ms");
             return true;
         }
@@ -115,7 +115,7 @@ namespace TimingLimiter
         {
             try
             {
-                RGui.Label("TimingLimiter 0.1.1 - ADOFAI 3.4.0");
+                RGui.Label("TimingLimiter 0.1.2 - ADOFAI 3.4.0");
                 RGui.Label("Limits accepted manual hits to a custom ±ms range.");
                 RGui.Label("This mod only narrows the game's normal timing window.");
                 RGui.Space(8f);
