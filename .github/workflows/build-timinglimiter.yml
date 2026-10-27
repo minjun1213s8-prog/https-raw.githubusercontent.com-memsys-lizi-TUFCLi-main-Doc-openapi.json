@@ -22,9 +22,10 @@ jobs:
         run: |
           mkdir -p out/TimingLimiter
           cp timinglimiter/bin/Release/netstandard2.0/TimingLimiter.dll out/TimingLimiter/TimingLimiter.dll
+          cp timinglimiter/bin/Release/netstandard2.0/0Harmony.dll out/TimingLimiter/0Harmony.dll
           cp TimingLimiter.Info.json out/TimingLimiter/Info.json
-          cd out/TimingLimiter && zip -r ../TimingLimiter_0.1.0_UMM_ADOFAI_3.4.0.zip .
+          cd out/TimingLimiter && zip -r ../TimingLimiter_0.1.1_UMM_ADOFAI_Current.zip .
       - uses: actions/upload-artifact@v4
         with:
-          name: TimingLimiter_0.1.0_UMM_ADOFAI_3.4.0
-          path: out/TimingLimiter_0.1.0_UMM_ADOFAI_3.4.0.zip
+          name: TimingLimiter_0.1.1_UMM_ADOFAI_Current
+          path: out/TimingLimiter_0.1.1_UMM_ADOFAI_Current.zip
