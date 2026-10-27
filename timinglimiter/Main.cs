@@ -47,7 +47,7 @@ namespace TimingLimiter
             }
 
             Log(
-                "TimingLimiter 0.1.3 loaded. Limit: ±" +
+                "TimingLimiter 0.1.4 loaded. Limit: ±" +
                 limitMs.ToString(
                     "0.##",
                     CultureInfo.InvariantCulture) +
@@ -89,7 +89,7 @@ namespace TimingLimiter
             try
             {
                 RGui.Label(
-                    "TimingLimiter 0.1.3 - current ADOFAI compatibility build");
+                    "TimingLimiter 0.1.4 - current ADOFAI compatibility build");
                 RGui.Label(
                     "Manual hits outside the configured ±ms range fail.");
                 RGui.Space(8f);
@@ -297,9 +297,18 @@ namespace TimingLimiter
 
                 try
                 {
-                    InvokeDeath(
-                        __instance,
-                        signedMs);
+                    bool failed =
+                        InvokeImmediateFail(
+                            __instance,
+                            signedMs);
+
+                    Log(
+                        "Limit exceeded: " +
+                        signedMs.ToString(
+                            "+0.00;-0.00;0.00",
+                            CultureInfo.InvariantCulture) +
+                        " ms, forcedFail=" +
+                        failed);
                 }
                 finally
                 {
@@ -508,34 +517,38 @@ namespace TimingLimiter
             return true;
         }
 
-        private static void InvokeDeath(
+        private static bool InvokeImmediateFail(
             object player,
             double signedMs)
         {
-            MethodInfo die =
-                player.GetType()
+            object controller =
+                GameBridge.GetController();
+
+            if (controller == null)
+            {
+                LogError(
+                    "Timing violation detected but controller was not found.");
+                return false;
+            }
+
+            MethodInfo failAction =
+                controller.GetType()
                     .GetMethods(
                         BindingFlags.Public |
                         BindingFlags.NonPublic |
                         BindingFlags.Instance)
                     .Where(m =>
-                        m.Name == "Die")
+                        m.Name == "FailAction")
                     .OrderBy(m =>
                         m.GetParameters().Length)
                     .FirstOrDefault();
 
-            if (die == null)
+            if (failAction == null)
             {
                 LogError(
-                    "Timing violation detected but scrPlayer.Die was not found.");
-                return;
+                    "Timing violation detected but FailAction was not found.");
+                return false;
             }
-
-            ParameterInfo[] p =
-                die.GetParameters();
-
-            object[] args =
-                new object[p.Length];
 
             string message =
                 "TimingLimiter: " +
@@ -547,6 +560,12 @@ namespace TimingLimiter
                     "0.##",
                     CultureInfo.InvariantCulture) +
                 "ms";
+
+            ParameterInfo[] p =
+                failAction.GetParameters();
+
+            object[] args =
+                new object[p.Length];
 
             for (int i = 0;
                  i < p.Length;
@@ -574,9 +593,18 @@ namespace TimingLimiter
                 }
             }
 
-            die.Invoke(
+            // Prevent the player from continuing to process inputs on the same
+            // frame. FailAction itself does not honor no-fail/invincibility.
+            ReflectionUtil.TryWriteNamed(
                 player,
+                "alive",
+                false);
+
+            failAction.Invoke(
+                controller,
                 args);
+
+            return true;
         }
 
         private static void LogTypeHints(string token)
@@ -818,6 +846,9 @@ namespace TimingLimiter
         private static Type conductorType;
         private static MemberInfo conductorInstanceMember;
 
+        private static Type controllerType;
+        private static MemberInfo controllerInstanceMember;
+
         private static bool resolved;
 
         public static bool IsAutoPlay()
@@ -868,6 +899,22 @@ namespace TimingLimiter
             }
         }
 
+        public static object GetController()
+        {
+            Resolve();
+
+            try
+            {
+                return ReflectionUtil.ReadMember(
+                    null,
+                    controllerInstanceMember);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         private static void Resolve()
         {
             if (resolved) return;
@@ -906,6 +953,16 @@ namespace TimingLimiter
             conductorInstanceMember =
                 ReflectionUtil.FindMember(
                     conductorType,
+                    "instance",
+                    all);
+
+            controllerType =
+                ReflectionUtil.FindTypeFlexible(
+                    "scrController");
+
+            controllerInstanceMember =
+                ReflectionUtil.FindMember(
+                    controllerType,
                     "instance",
                     all);
         }
@@ -1310,6 +1367,67 @@ namespace TimingLimiter
             {
                 return false;
             }
+        }
+
+        public static bool TryWriteNamed(
+            object instance,
+            string name,
+            object value)
+        {
+            if (instance == null)
+                return false;
+
+            const BindingFlags all =
+                BindingFlags.Public |
+                BindingFlags.NonPublic |
+                BindingFlags.Static |
+                BindingFlags.Instance;
+
+            MemberInfo member =
+                FindMember(
+                    instance.GetType(),
+                    name,
+                    all);
+
+            try
+            {
+                FieldInfo field =
+                    member as FieldInfo;
+
+                if (field != null)
+                {
+                    field.SetValue(
+                        field.IsStatic
+                            ? null
+                            : instance,
+                        value);
+
+                    return true;
+                }
+
+                PropertyInfo property =
+                    member as PropertyInfo;
+
+                if (property != null &&
+                    property.CanWrite)
+                {
+                    MethodInfo setter =
+                        property.GetSetMethod(true);
+
+                    property.SetValue(
+                        setter != null &&
+                        setter.IsStatic
+                            ? null
+                            : instance,
+                        value,
+                        null);
+
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
         }
 
         public static object DefaultValue(
