@@ -47,7 +47,7 @@ namespace TimingLimiter
             }
 
             Log(
-                "TimingLimiter 0.1.4 loaded. Limit: ±" +
+                "TimingLimiter 0.1.5 loaded. Limit: ±" +
                 limitMs.ToString(
                     "0.##",
                     CultureInfo.InvariantCulture) +
@@ -89,7 +89,7 @@ namespace TimingLimiter
             try
             {
                 RGui.Label(
-                    "TimingLimiter 0.1.4 - current ADOFAI compatibility build");
+                    "TimingLimiter 0.1.5 - current ADOFAI compatibility build");
                 RGui.Label(
                     "Manual hits outside the configured ±ms range fail.");
                 RGui.Space(8f);
@@ -203,8 +203,8 @@ namespace TimingLimiter
                         ParameterInfo[] p =
                             m.GetParameters();
 
-                        return p.Length == 1 &&
-                               p[0].ParameterType ==
+                        return p.Length >= 1 &&
+                               p[p.Length - 1].ParameterType ==
                                    typeof(bool);
                     });
 
@@ -213,7 +213,7 @@ namespace TimingLimiter
                     LogError(
                         "scrPlayer found as " +
                         playerType.FullName +
-                        " but compatible Hit(bool) was not found. Candidates: " +
+                        " but compatible Hit(..., bool) was not found. Candidates: " +
                         string.Join(
                             ", ",
                             hitCandidates.Select(
@@ -241,7 +241,8 @@ namespace TimingLimiter
                     "Patched " +
                     playerType.FullName +
                     "." +
-                    DescribeMethod(hitMethod));
+                    DescribeMethod(hitMethod) +
+                    " (latest Hit signature supported)");
 
                 return true;
             }
@@ -266,11 +267,17 @@ namespace TimingLimiter
                 __instance == null)
                 return true;
 
-            bool isAuto =
-                __args != null &&
-                __args.Length > 0 &&
-                __args[0] is bool &&
-                (bool)__args[0];
+            bool isAuto = false;
+
+            if (__args != null &&
+                __args.Length > 0)
+            {
+                object lastArg =
+                    __args[__args.Length - 1];
+
+                if (lastArg is bool)
+                    isAuto = (bool)lastArg;
+            }
 
             if (isAuto ||
                 GameBridge.IsAutoPlay())
