@@ -73,7 +73,34 @@ namespace TimingLimiter
             try
             {
                 if (harmonyInstance != null)
-                    harmonyInstance.UnpatchSelf();
+                {
+                    MethodInfo unpatchAll =
+                        typeof(Harmony).GetMethod(
+                            "UnpatchAll",
+                            BindingFlags.Public |
+                            BindingFlags.Instance |
+                            BindingFlags.Static);
+
+                    if (unpatchAll != null)
+                    {
+                        ParameterInfo[] p =
+                            unpatchAll.GetParameters();
+
+                        object target =
+                            unpatchAll.IsStatic
+                                ? null
+                                : (object)harmonyInstance;
+
+                        object[] args =
+                            p.Length == 0
+                                ? null
+                                : new object[] { HarmonyId };
+
+                        unpatchAll.Invoke(
+                            target,
+                            args);
+                    }
+                }
             }
             catch (Exception ex)
             {
