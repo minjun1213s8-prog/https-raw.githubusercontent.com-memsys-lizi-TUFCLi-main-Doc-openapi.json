@@ -47,7 +47,7 @@ namespace TimingLimiter
             }
 
             Log(
-                "TimingLimiter 0.1.6 loaded. Limit: ±" +
+                "TimingLimiter 0.1.7 loaded. Limit: ±" +
                 limitMs.ToString(
                     "0.##",
                     CultureInfo.InvariantCulture) +
@@ -89,9 +89,9 @@ namespace TimingLimiter
             try
             {
                 RGui.Label(
-                    "TimingLimiter 0.1.6 - current ADOFAI compatibility build");
+                    "TimingLimiter 0.1.7 - current ADOFAI compatibility build");
                 RGui.Label(
-                    "Manual hits outside the configured ±ms range fail.");
+                    "Manual hits outside the configured ±ms range die through ADOFAI's normal death sequence.");
                 RGui.Space(8f);
 
                 RGui.Label("Timing limit (±ms)");
@@ -311,7 +311,7 @@ namespace TimingLimiter
                 try
                 {
                     bool failed =
-                        InvokeImmediateFail(
+                        InvokeNaturalDeath(
                             __instance,
                             signedMs);
 
@@ -549,36 +549,30 @@ namespace TimingLimiter
             return true;
         }
 
-        private static bool InvokeImmediateFail(
+        private static bool InvokeNaturalDeath(
             object player,
             double signedMs)
         {
-            object controller =
-                GameBridge.GetController();
-
-            if (controller == null)
-            {
-                LogError(
-                    "Timing violation detected but controller was not found.");
+            if (player == null)
                 return false;
-            }
 
-            MethodInfo failAction =
-                controller.GetType()
+            MethodInfo die =
+                player.GetType()
                     .GetMethods(
                         BindingFlags.Public |
                         BindingFlags.NonPublic |
                         BindingFlags.Instance)
                     .Where(m =>
-                        m.Name == "FailAction")
-                    .OrderBy(m =>
+                        m.Name == "Die" &&
+                        m.ReturnType == typeof(void))
+                    .OrderByDescending(m =>
                         m.GetParameters().Length)
                     .FirstOrDefault();
 
-            if (failAction == null)
+            if (die == null)
             {
                 LogError(
-                    "Timing violation detected but FailAction was not found.");
+                    "Timing violation detected but scrPlayer.Die was not found.");
                 return false;
             }
 
@@ -594,7 +588,7 @@ namespace TimingLimiter
                 "ms";
 
             ParameterInfo[] p =
-                failAction.GetParameters();
+                die.GetParameters();
 
             object[] args =
                 new object[p.Length];
@@ -603,14 +597,40 @@ namespace TimingLimiter
                  i < p.Length;
                  i++)
             {
-                if (string.Equals(
-                    p[i].Name,
-                    "failMessage",
-                    StringComparison.OrdinalIgnoreCase) &&
-                    p[i].ParameterType ==
-                        typeof(string))
+                string name =
+                    p[i].Name ?? "";
+
+                if (name.Equals(
+                        "overload",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    p[i].ParameterType == typeof(bool))
+                {
+                    args[i] = false;
+                }
+                else if (name.Equals(
+                             "multipress",
+                             StringComparison.OrdinalIgnoreCase) &&
+                         p[i].ParameterType == typeof(bool))
+                {
+                    args[i] = false;
+                }
+                else if (name.Equals(
+                             "failMessage",
+                             StringComparison.OrdinalIgnoreCase) &&
+                         p[i].ParameterType == typeof(string))
                 {
                     args[i] = message;
+                }
+                else if (name.Equals(
+                             "hitbox",
+                             StringComparison.OrdinalIgnoreCase) &&
+                         p[i].ParameterType == typeof(bool))
+                {
+                    // Native Die(hitbox:true) skips no-fail/safe-tile guards,
+                    // but still executes the game's complete normal death
+                    // sequence: flash, planet death animation, OnPlayerDied,
+                    // FailAction, Fail2Action and the standard restart flow.
+                    args[i] = true;
                 }
                 else if (p[i].HasDefaultValue)
                 {
@@ -625,15 +645,8 @@ namespace TimingLimiter
                 }
             }
 
-            // Prevent the player from continuing to process inputs on the same
-            // frame. FailAction itself does not honor no-fail/invincibility.
-            ReflectionUtil.TryWriteNamed(
+            die.Invoke(
                 player,
-                "alive",
-                false);
-
-            failAction.Invoke(
-                controller,
                 args);
 
             return true;
