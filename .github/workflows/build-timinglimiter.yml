@@ -33,8 +33,8 @@ jobs:
           echo "Using Harmony: $HARMONY_DLL"
           cp "$HARMONY_DLL" out/TimingLimiter/0Harmony.dll
           cp TimingLimiter.Info.json out/TimingLimiter/Info.json
-          cd out/TimingLimiter && zip -r ../TimingLimiter_0.1.8_UMM_ADOFAI_Current.zip .
+          cd out/TimingLimiter && zip -r ../TimingLimiter_0.1.9_UMM_ADOFAI_Current.zip .
       - uses: actions/upload-artifact@v4
         with:
-          name: TimingLimiter_0.1.8_UMM_ADOFAI_Current
-          path: out/TimingLimiter_0.1.8_UMM_ADOFAI_Current.zip
+          name: TimingLimiter_0.1.9_UMM_ADOFAI_Current
+          path: out/TimingLimiter_0.1.9_UMM_ADOFAI_Current.zip
