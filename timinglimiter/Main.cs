@@ -47,7 +47,7 @@ namespace TimingLimiter
             }
 
             Log(
-                "TimingLimiter 0.1.8 loaded. Limit: ±" +
+                "TimingLimiter 0.1.9 loaded. Limit: ±" +
                 limitMs.ToString(
                     "0.##",
                     CultureInfo.InvariantCulture) +
@@ -89,7 +89,7 @@ namespace TimingLimiter
             try
             {
                 RGui.Label(
-                    "TimingLimiter 0.1.8 - current ADOFAI compatibility build");
+                    "TimingLimiter 0.1.9 - current ADOFAI compatibility build");
                 RGui.Label(
                     "Manual hits outside the configured ±ms range die through ADOFAI's normal death sequence.");
                 RGui.Space(8f);
@@ -133,27 +133,27 @@ namespace TimingLimiter
                 }
 
                 RGui.Space(8f);
-                RGui.Label("Perfect limit presets (±1 frame)");
+                RGui.Label("Perfect limit presets (1-frame total window)");
 
-                if (RGui.Button("10 FPS Perfect  (±100.00 ms)"))
+                if (RGui.Button("10 FPS Perfect  (±50.00 ms)"))
                     ApplyFramePreset(10);
 
-                if (RGui.Button("20 FPS Perfect  (±50.00 ms)"))
+                if (RGui.Button("20 FPS Perfect  (±25.00 ms)"))
                     ApplyFramePreset(20);
 
-                if (RGui.Button("30 FPS Perfect  (±33.33 ms)"))
+                if (RGui.Button("30 FPS Perfect  (±16.67 ms)"))
                     ApplyFramePreset(30);
 
-                if (RGui.Button("60 FPS Perfect  (±16.67 ms)"))
+                if (RGui.Button("60 FPS Perfect  (±8.33 ms)"))
                     ApplyFramePreset(60);
 
-                if (RGui.Button("120 FPS Perfect  (±8.33 ms)"))
+                if (RGui.Button("120 FPS Perfect  (±4.17 ms)"))
                     ApplyFramePreset(120);
 
-                if (RGui.Button("240 FPS Perfect  (±4.17 ms)"))
+                if (RGui.Button("240 FPS Perfect  (±2.08 ms)"))
                     ApplyFramePreset(240);
 
-                if (RGui.Button("360 FPS Perfect  (±2.78 ms)"))
+                if (RGui.Button("360 FPS Perfect  (±1.39 ms)"))
                     ApplyFramePreset(360);
 
                 RGui.Space(5f);
@@ -165,7 +165,7 @@ namespace TimingLimiter
                     " ms");
 
                 RGui.Label(
-                    "Preset rule: 1 frame = 1000 / FPS milliseconds.");
+                    "Preset rule: total window = 1 frame, so each side = 1000 / FPS / 2 ms.");
                 RGui.Label(
                     "Autoplay, auto tiles, free-roam movement, puzzle movement and midspin-infinite inputs are ignored.");
             }
@@ -738,7 +738,7 @@ namespace TimingLimiter
                 return;
 
             limitMs =
-                1000.0 / (double)fps;
+                1000.0 / (double)fps / 2.0;
 
             limitText =
                 limitMs.ToString(
