@@ -142,13 +142,106 @@ namespace PracticeStats
                 RGui.Label("Attempt: " + ResettableAttemptStore.GetCurrentMapAttempts() + " (resettable per map)");
                 RGui.Label("Attempt+: " + StableAttemptStore.GetCurrentMapAttempts() + " (persistent per map)");
 
+                RGui.Space(6f);
+                RGui.Label("Attempt- limiter");
+
+                bool minusEnabled =
+                    RemainingAttemptStore.IsEnabled;
+
+                bool nextMinusEnabled =
+                    RGui.Toggle(
+                        minusEnabled,
+                        "Enable Attempt- limiter");
+
+                if (nextMinusEnabled != minusEnabled)
+                {
+                    RemainingAttemptStore.SetEnabled(
+                        nextMinusEnabled);
+
+                    GlobalAttemptTracker.OnRemainingLimitChanged();
+
+                    status = nextMinusEnabled
+                        ? "Attempt- limiter enabled"
+                        : "Attempt- limiter disabled (no blocking or consumption)";
+                }
+
+                RGui.Label(
+                    "Attempt- slots: " +
+                    RemainingAttemptStore.SlotCount +
+                    " / 10    Active: S" +
+                    RemainingAttemptStore.ActiveSlot);
+
+                for (int slot = 1;
+                     slot <= RemainingAttemptStore.SlotCount;
+                     slot++)
+                {
+                    int slotRemaining;
+                    bool slotConfigured =
+                        RemainingAttemptStore.TryGetSlotRemaining(
+                            slot,
+                            out slotRemaining);
+
+                    string slotLabel =
+                        "Use S" + slot +
+                        (slot == RemainingAttemptStore.ActiveSlot
+                            ? " [ACTIVE]"
+                            : "") +
+                        " - " +
+                        (slotConfigured
+                            ? slotRemaining.ToString()
+                            : "not set");
+
+                    if (RGui.Button(slotLabel))
+                    {
+                        RemainingAttemptStore.SetActiveSlot(
+                            slot);
+
+                        int selectedRemaining;
+                        if (RemainingAttemptStore.TryGetCurrentMapRemaining(
+                                out selectedRemaining))
+                        {
+                            remainingAttemptsText =
+                                selectedRemaining.ToString();
+                        }
+
+                        GlobalAttemptTracker.OnRemainingLimitChanged();
+
+                        status =
+                            "Attempt- active slot: S" +
+                            slot;
+                    }
+                }
+
+                if (RemainingAttemptStore.SlotCount < 10 &&
+                    RGui.Button("Add Attempt- slot"))
+                {
+                    int addedSlot =
+                        RemainingAttemptStore.AddSlot();
+
+                    if (addedSlot > 0)
+                    {
+                        RemainingAttemptStore.SetActiveSlot(
+                            addedSlot);
+
+                        remainingAttemptsText = "0";
+
+                        GlobalAttemptTracker.OnRemainingLimitChanged();
+
+                        status =
+                            "Created Attempt- slot S" +
+                            addedSlot;
+                    }
+                }
+
                 int remaining;
                 bool remainingConfigured =
                     RemainingAttemptStore.TryGetCurrentMapRemaining(
                         out remaining);
 
                 RGui.Label(
-                    "Attempt- remaining (shared across maps): " +
+                    "Attempt- S" +
+                    RemainingAttemptStore.ActiveSlot +
+                    " remaining: " +
                     (remainingConfigured
                         ? remaining.ToString()
                         : "not set"));
@@ -156,7 +249,7 @@ namespace PracticeStats
                 remainingAttemptsText =
                     RGui.TextField(remainingAttemptsText);
 
-                if (RGui.Button("Set shared Attempt-"))
+                if (RGui.Button("Set active Attempt- slot"))
                 {
                     int value;
                     if (int.TryParse(
@@ -174,11 +267,15 @@ namespace PracticeStats
                             value.ToString();
 
                         GlobalAttemptTracker.OnRemainingLimitChanged();
-                        status = "Shared Attempt- set to " + value;
+                        status =
+                            "Attempt- S" +
+                            RemainingAttemptStore.ActiveSlot +
+                            " set to " +
+                            value;
                     }
                     else
                     {
-                        status = "Enter a valid -Attempt number";
+                        status = "Enter a valid Attempt- number";
                     }
                 }
 
@@ -1079,17 +1176,57 @@ namespace PracticeStats
 
     internal static class RemainingAttemptStore
     {
-        private const string GlobalKey = "global";
+        private const string LegacyGlobalKey = "global";
+        private const string EnabledKey = "meta:enabled";
+        private const string SlotCountKey = "meta:slotCount";
+        private const string ActiveSlotKey = "meta:activeSlot";
+        private const string SlotPrefix = "slot:";
+        private const int MaxSlots = 10;
 
         private static readonly Dictionary<string, int> legacyRemaining =
             new Dictionary<string, int>(
                 StringComparer.OrdinalIgnoreCase);
 
+        private static readonly bool[] slotConfigured =
+            new bool[MaxSlots];
+
+        private static readonly int[] slotRemaining =
+            new int[MaxSlots];
+
         private static string filePath;
         private static string backupPath;
         private static bool initialized;
-        private static bool configured;
-        private static int remaining;
+
+        private static bool limiterEnabled = true;
+        private static int slotCount = 1;
+        private static int activeSlot = 1;
+
+        public static bool IsEnabled
+        {
+            get
+            {
+                Initialize();
+                return limiterEnabled;
+            }
+        }
+
+        public static int SlotCount
+        {
+            get
+            {
+                Initialize();
+                return slotCount;
+            }
+        }
+
+        public static int ActiveSlot
+        {
+            get
+            {
+                Initialize();
+                return activeSlot;
+            }
+        }
 
         public static void Initialize()
         {
@@ -1112,6 +1249,18 @@ namespace PracticeStats
 
                 if (!LoadFile(filePath))
                     LoadFile(backupPath);
+
+                slotCount =
+                    Math.Max(
+                        1,
+                        Math.Min(MaxSlots, slotCount));
+
+                activeSlot =
+                    Math.Max(
+                        1,
+                        Math.Min(slotCount, activeSlot));
+
+                EnsureLegacyMigration();
             }
             catch (Exception ex)
             {
@@ -1121,24 +1270,84 @@ namespace PracticeStats
             }
         }
 
+        public static void SetEnabled(bool value)
+        {
+            Initialize();
+
+            limiterEnabled = value;
+            Save();
+        }
+
+        public static int AddSlot()
+        {
+            Initialize();
+
+            if (slotCount >= MaxSlots)
+                return -1;
+
+            slotCount++;
+
+            // A newly created budget is explicit and starts at zero.
+            slotConfigured[slotCount - 1] = true;
+            slotRemaining[slotCount - 1] = 0;
+
+            Save();
+            return slotCount;
+        }
+
+        public static bool SetActiveSlot(int slot)
+        {
+            Initialize();
+
+            if (slot < 1 || slot > slotCount)
+                return false;
+
+            activeSlot = slot;
+            Save();
+            return true;
+        }
+
+        public static bool TryGetSlotRemaining(
+            int slot,
+            out int value)
+        {
+            Initialize();
+            EnsureLegacyMigration();
+
+            if (slot < 1 ||
+                slot > slotCount ||
+                !slotConfigured[slot - 1])
+            {
+                value = 0;
+                return false;
+            }
+
+            value = slotRemaining[slot - 1];
+            return true;
+        }
+
         // Method name kept for compatibility with the rest of the mod.
-        // The value itself is global, not per-map.
+        // The value is the currently active global Attempt- slot.
         public static bool TryGetCurrentMapRemaining(
             out int value)
         {
             Initialize();
             EnsureLegacyMigration();
 
-            value = configured ? remaining : 0;
-            return configured;
+            return TryGetSlotRemaining(
+                activeSlot,
+                out value);
         }
 
         public static bool SetCurrentMapRemaining(int value)
         {
             Initialize();
 
-            configured = true;
-            remaining = Math.Max(0, value);
+            int index = activeSlot - 1;
+
+            slotConfigured[index] = true;
+            slotRemaining[index] = Math.Max(0, value);
+
             legacyRemaining.Clear();
 
             Save();
@@ -1151,50 +1360,66 @@ namespace PracticeStats
             Initialize();
             EnsureLegacyMigration();
 
-            if (!configured)
+            // Disabling Attempt- makes the entire limiter inert. Existing
+            // slot balances are preserved exactly and are never consumed.
+            if (!limiterEnabled)
             {
                 after = 0;
                 return true;
             }
 
-            if (remaining <= 0)
+            int index = activeSlot - 1;
+
+            if (!slotConfigured[index])
+            {
+                after = 0;
+                return true;
+            }
+
+            if (slotRemaining[index] <= 0)
             {
                 after = 0;
                 return false;
             }
 
-            remaining--;
-            after = remaining;
+            slotRemaining[index]--;
+            after = slotRemaining[index];
+
             Save();
             return true;
         }
 
         private static void EnsureLegacyMigration()
         {
-            if (configured ||
+            // Old builds stored one global Attempt- under "global", and even
+            // older builds could store one value per map. Both migrate only
+            // into slot 1, leaving every later slot independent.
+            if (slotConfigured[0] ||
                 legacyRemaining.Count == 0)
                 return;
 
             string currentKey =
                 StableAttemptStore.CurrentMapKey();
 
-            if (string.IsNullOrEmpty(currentKey))
-                return;
-
             int migrated;
-            if (!legacyRemaining.TryGetValue(
+
+            if (!string.IsNullOrEmpty(currentKey) &&
+                legacyRemaining.TryGetValue(
                     currentKey,
                     out migrated))
             {
-                // Old versions could have one value per map. If the currently
-                // opened map has no old entry, preserve the largest remaining
-                // balance rather than discarding the user's budget.
-                migrated = legacyRemaining.Values.Max();
+                // Use the current map's old value when it exists.
+            }
+            else
+            {
+                migrated =
+                    legacyRemaining.Values.Max();
             }
 
-            configured = true;
-            remaining = migrated;
+            slotConfigured[0] = true;
+            slotRemaining[0] = migrated;
             legacyRemaining.Clear();
+
             Save();
         }
 
@@ -1211,12 +1436,15 @@ namespace PracticeStats
 
                 int loaded = 0;
 
-                foreach (string rawLine in File.ReadAllLines(path))
+                foreach (string rawLine in
+                    File.ReadAllLines(path))
                 {
                     if (string.IsNullOrWhiteSpace(rawLine))
                         continue;
 
-                    int tab = rawLine.LastIndexOf('\t');
+                    int tab =
+                        rawLine.LastIndexOf('\t');
+
                     if (tab <= 0 ||
                         tab >= rawLine.Length - 1)
                         continue;
@@ -1228,7 +1456,9 @@ namespace PracticeStats
                         rawLine.Substring(tab + 1);
 
                     int count;
-                    if (!int.TryParse(countText, out count) ||
+                    if (!int.TryParse(
+                            countText,
+                            out count) ||
                         count < 0)
                         continue;
 
@@ -1249,14 +1479,63 @@ namespace PracticeStats
 
                     if (string.Equals(
                         key,
-                        GlobalKey,
+                        EnabledKey,
                         StringComparison.OrdinalIgnoreCase))
                     {
-                        configured = true;
-                        remaining = count;
+                        limiterEnabled = count != 0;
+                    }
+                    else if (string.Equals(
+                        key,
+                        SlotCountKey,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        slotCount =
+                            Math.Max(
+                                1,
+                                Math.Min(MaxSlots, count));
+                    }
+                    else if (string.Equals(
+                        key,
+                        ActiveSlotKey,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        activeSlot =
+                            Math.Max(
+                                1,
+                                Math.Min(MaxSlots, count));
+                    }
+                    else if (key.StartsWith(
+                        SlotPrefix,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        int slot;
+
+                        if (int.TryParse(
+                                key.Substring(
+                                    SlotPrefix.Length),
+                                out slot) &&
+                            slot >= 1 &&
+                            slot <= MaxSlots)
+                        {
+                            slotConfigured[slot - 1] = true;
+                            slotRemaining[slot - 1] = count;
+
+                            if (slot > slotCount)
+                                slotCount = slot;
+                        }
+                    }
+                    else if (string.Equals(
+                        key,
+                        LegacyGlobalKey,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Direct migration from the previous global format.
+                        slotConfigured[0] = true;
+                        slotRemaining[0] = count;
                     }
                     else
                     {
+                        // Preserve support for the oldest per-map format.
                         legacyRemaining[key] = count;
                     }
 
@@ -1279,21 +1558,46 @@ namespace PracticeStats
         {
             try
             {
-                if (string.IsNullOrEmpty(filePath) ||
-                    !configured)
+                if (string.IsNullOrEmpty(filePath))
                     return;
 
-                string tempPath = filePath + ".tmp";
+                string tempPath =
+                    filePath + ".tmp";
 
-                string line =
-                    Convert.ToBase64String(
-                        Encoding.UTF8.GetBytes(GlobalKey)) +
-                    "\t" +
-                    remaining;
+                var lines =
+                    new List<string>();
+
+                AddLine(
+                    lines,
+                    EnabledKey,
+                    limiterEnabled ? 1 : 0);
+
+                AddLine(
+                    lines,
+                    SlotCountKey,
+                    slotCount);
+
+                AddLine(
+                    lines,
+                    ActiveSlotKey,
+                    activeSlot);
+
+                for (int slot = 1;
+                     slot <= slotCount;
+                     slot++)
+                {
+                    if (!slotConfigured[slot - 1])
+                        continue;
+
+                    AddLine(
+                        lines,
+                        SlotPrefix + slot,
+                        slotRemaining[slot - 1]);
+                }
 
                 File.WriteAllLines(
                     tempPath,
-                    new[] { line });
+                    lines.ToArray());
 
                 if (File.Exists(filePath))
                 {
@@ -1309,7 +1613,9 @@ namespace PracticeStats
                     File.Delete(filePath);
                 }
 
-                File.Move(tempPath, filePath);
+                File.Move(
+                    tempPath,
+                    filePath);
             }
             catch (Exception ex)
             {
@@ -1317,6 +1623,18 @@ namespace PracticeStats
                     "Attempt- save error: " +
                     ex.Message);
             }
+        }
+
+        private static void AddLine(
+            List<string> lines,
+            string key,
+            int value)
+        {
+            lines.Add(
+                Convert.ToBase64String(
+                    Encoding.UTF8.GetBytes(key)) +
+                "\t" +
+                value);
         }
     }
 
@@ -1720,12 +2038,22 @@ namespace PracticeStats
 
         public static void OnRemainingLimitChanged()
         {
+            if (!RemainingAttemptStore.IsEnabled)
+            {
+                ReleaseLimitBlock();
+                return;
+            }
+
             if (!blockedByRemainingLimit)
                 return;
 
             int remaining;
-            if (RemainingAttemptStore
-                    .TryGetCurrentMapRemaining(out remaining) &&
+            bool configured =
+                RemainingAttemptStore
+                    .TryGetCurrentMapRemaining(
+                        out remaining);
+
+            if (!configured ||
                 remaining > 0)
             {
                 ReleaseLimitBlock();
@@ -1773,18 +2101,22 @@ namespace PracticeStats
                 return;
             }
 
-            int remaining;
-            bool configured =
-                RemainingAttemptStore
-                    .TryGetCurrentMapRemaining(
-                        out remaining);
-
-            if (configured && remaining <= 0)
+            if (RemainingAttemptStore.IsEnabled)
             {
-                BlockForRemainingLimit();
-                AttemptPlusOverlay
-                    .FlashRemainingExhausted();
-                return;
+                int remaining;
+                bool configured =
+                    RemainingAttemptStore
+                        .TryGetCurrentMapRemaining(
+                            out remaining);
+
+                if (configured &&
+                    remaining <= 0)
+                {
+                    BlockForRemainingLimit();
+                    AttemptPlusOverlay
+                        .FlashRemainingExhausted();
+                    return;
+                }
             }
 
             ReleaseLimitBlock();
@@ -1796,14 +2128,13 @@ namespace PracticeStats
             ResettableAttemptStore.RecordAttemptStart();
             StableAttemptStore.IncrementCurrentMapAttempts();
 
-            int remaining;
-            if (RemainingAttemptStore
-                    .TryGetCurrentMapRemaining(out remaining) &&
-                remaining > 0)
+            if (RemainingAttemptStore.IsEnabled)
             {
+                int after;
+
                 RemainingAttemptStore
-                    .SetCurrentMapRemaining(
-                        remaining - 1);
+                    .TryConsumeCurrentMapAttempt(
+                        out after);
             }
 
             runCounted = true;
@@ -1891,13 +2222,29 @@ namespace PracticeStats
                 RemainingAttemptStore.TryGetCurrentMapRemaining(
                     out remaining);
 
-            string remainingText =
-                configured
-                    ? "Attempt- " + remaining
-                    : "Attempt- --";
+            string remainingText;
 
-            if (GlobalAttemptTracker.IsLimitBlocked)
-                remainingText += "  NO ATTEMPTS LEFT";
+            if (!RemainingAttemptStore.IsEnabled)
+            {
+                remainingText =
+                    "Attempt- OFF";
+            }
+            else
+            {
+                remainingText =
+                    configured
+                        ? "Attempt- S" +
+                          RemainingAttemptStore.ActiveSlot +
+                          " " +
+                          remaining
+                        : "Attempt- S" +
+                          RemainingAttemptStore.ActiveSlot +
+                          " --";
+
+                if (GlobalAttemptTracker.IsLimitBlocked)
+                    remainingText +=
+                        "  NO ATTEMPTS LEFT";
+            }
 
             if (remainingFlashFrames > 0)
             {
