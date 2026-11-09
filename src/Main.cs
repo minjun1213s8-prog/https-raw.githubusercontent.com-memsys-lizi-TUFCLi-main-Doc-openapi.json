@@ -16,6 +16,7 @@ namespace PracticeStats
         private static readonly PracticeSession session = new PracticeSession();
         private static string attemptsText = "100";
         private static string remainingAttemptsText = "1000";
+        private static string remainingSlotNameText = "";
         private static string status = "Select a range with Shift + Left Click";
         private static bool hasEditorRange;
         private static int selectedCount;
@@ -31,6 +32,9 @@ namespace PracticeStats
             StableAttemptStore.Initialize();
             ResettableAttemptStore.Initialize();
             RemainingAttemptStore.Initialize();
+            remainingSlotNameText =
+                RemainingAttemptStore.GetSlotName(
+                    RemainingAttemptStore.ActiveSlot);
             modEntry.OnToggle = OnToggle;
             modEntry.OnUpdate = OnUpdate;
             modEntry.OnGUI = OnGUI;
@@ -168,7 +172,7 @@ namespace PracticeStats
                 RGui.Label(
                     "Attempt- slots: " +
                     RemainingAttemptStore.SlotCount +
-                    " / 10    Active: S" +
+                    " / 12    Active: S" +
                     RemainingAttemptStore.ActiveSlot);
 
                 for (int slot = 1;
@@ -181,8 +185,13 @@ namespace PracticeStats
                             slot,
                             out slotRemaining);
 
+                    string slotName =
+                        RemainingAttemptStore.GetSlotName(
+                            slot);
+
                     string slotLabel =
                         "Use S" + slot +
+                        " [" + slotName + "]" +
                         (slot == RemainingAttemptStore.ActiveSlot
                             ? " [ACTIVE]"
                             : "") +
@@ -204,15 +213,22 @@ namespace PracticeStats
                                 selectedRemaining.ToString();
                         }
 
+                        remainingSlotNameText =
+                            RemainingAttemptStore.GetSlotName(
+                                slot);
+
                         GlobalAttemptTracker.OnRemainingLimitChanged();
 
                         status =
                             "Attempt- active slot: S" +
-                            slot;
+                            slot +
+                            " [" +
+                            remainingSlotNameText +
+                            "]";
                     }
                 }
 
-                if (RemainingAttemptStore.SlotCount < 10 &&
+                if (RemainingAttemptStore.SlotCount < 12 &&
                     RGui.Button("Add Attempt- slot"))
                 {
                     int addedSlot =
@@ -224,6 +240,9 @@ namespace PracticeStats
                             addedSlot);
 
                         remainingAttemptsText = "0";
+                        remainingSlotNameText =
+                            RemainingAttemptStore.GetSlotName(
+                                addedSlot);
 
                         GlobalAttemptTracker.OnRemainingLimitChanged();
 
@@ -231,6 +250,34 @@ namespace PracticeStats
                             "Created Attempt- slot S" +
                             addedSlot;
                     }
+                }
+
+                RGui.Space(4f);
+                RGui.Label(
+                    "Active slot name (S" +
+                    RemainingAttemptStore.ActiveSlot +
+                    ")");
+
+                remainingSlotNameText =
+                    RGui.TextField(
+                        remainingSlotNameText);
+
+                if (RGui.Button("Rename active Attempt- slot"))
+                {
+                    RemainingAttemptStore.SetSlotName(
+                        RemainingAttemptStore.ActiveSlot,
+                        remainingSlotNameText);
+
+                    remainingSlotNameText =
+                        RemainingAttemptStore.GetSlotName(
+                            RemainingAttemptStore.ActiveSlot);
+
+                    status =
+                        "Renamed Attempt- S" +
+                        RemainingAttemptStore.ActiveSlot +
+                        " to [" +
+                        remainingSlotNameText +
+                        "]";
                 }
 
                 int remaining;
@@ -1181,7 +1228,8 @@ namespace PracticeStats
         private const string SlotCountKey = "meta:slotCount";
         private const string ActiveSlotKey = "meta:activeSlot";
         private const string SlotPrefix = "slot:";
-        private const int MaxSlots = 10;
+        private const string SlotNamePrefix = "slotName:";
+        private const int MaxSlots = 12;
 
         private static readonly Dictionary<string, int> legacyRemaining =
             new Dictionary<string, int>(
@@ -1192,6 +1240,9 @@ namespace PracticeStats
 
         private static readonly int[] slotRemaining =
             new int[MaxSlots];
+
+        private static readonly string[] slotNames =
+            new string[MaxSlots];
 
         private static string filePath;
         private static string backupPath;
@@ -1278,6 +1329,51 @@ namespace PracticeStats
             Save();
         }
 
+        public static string GetSlotName(
+            int slot)
+        {
+            Initialize();
+
+            if (slot < 1 ||
+                slot > slotCount)
+                return "Slot " + slot;
+
+            string value =
+                slotNames[slot - 1];
+
+            return string.IsNullOrWhiteSpace(value)
+                ? "Slot " + slot
+                : value;
+        }
+
+        public static bool SetSlotName(
+            int slot,
+            string value)
+        {
+            Initialize();
+
+            if (slot < 1 ||
+                slot > slotCount)
+                return false;
+
+            string normalized =
+                (value ?? "").Trim();
+
+            if (normalized.Length > 40)
+                normalized =
+                    normalized.Substring(0, 40);
+
+            if (string.IsNullOrWhiteSpace(normalized))
+                normalized =
+                    "Slot " + slot;
+
+            slotNames[slot - 1] =
+                normalized;
+
+            Save();
+            return true;
+        }
+
         public static int AddSlot()
         {
             Initialize();
@@ -1290,6 +1386,8 @@ namespace PracticeStats
             // A newly created budget is explicit and starts at zero.
             slotConfigured[slotCount - 1] = true;
             slotRemaining[slotCount - 1] = 0;
+            slotNames[slotCount - 1] =
+                "Slot " + slotCount;
 
             Save();
             return slotCount;
@@ -1505,6 +1603,54 @@ namespace PracticeStats
                                 Math.Min(MaxSlots, count));
                     }
                     else if (key.StartsWith(
+                        SlotNamePrefix,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        string payload =
+                            key.Substring(
+                                SlotNamePrefix.Length);
+
+                        int colon =
+                            payload.IndexOf(':');
+
+                        if (colon > 0 &&
+                            colon < payload.Length - 1)
+                        {
+                            int slot;
+
+                            if (int.TryParse(
+                                    payload.Substring(0, colon),
+                                    out slot) &&
+                                slot >= 1 &&
+                                slot <= MaxSlots)
+                            {
+                                try
+                                {
+                                    string name =
+                                        Encoding.UTF8.GetString(
+                                            Convert.FromBase64String(
+                                                payload.Substring(
+                                                    colon + 1)));
+
+                                    name =
+                                        (name ?? "").Trim();
+
+                                    if (name.Length > 40)
+                                        name =
+                                            name.Substring(0, 40);
+
+                                    if (!string.IsNullOrWhiteSpace(name))
+                                        slotNames[slot - 1] =
+                                            name;
+
+                                    if (slot > slotCount)
+                                        slotCount = slot;
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+                    else if (key.StartsWith(
                         SlotPrefix,
                         StringComparison.OrdinalIgnoreCase))
                     {
@@ -1586,13 +1732,26 @@ namespace PracticeStats
                      slot <= slotCount;
                      slot++)
                 {
-                    if (!slotConfigured[slot - 1])
-                        continue;
+                    if (slotConfigured[slot - 1])
+                    {
+                        AddLine(
+                            lines,
+                            SlotPrefix + slot,
+                            slotRemaining[slot - 1]);
+                    }
+
+                    string slotName =
+                        GetSlotName(slot);
 
                     AddLine(
                         lines,
-                        SlotPrefix + slot,
-                        slotRemaining[slot - 1]);
+                        SlotNamePrefix +
+                        slot +
+                        ":" +
+                        Convert.ToBase64String(
+                            Encoding.UTF8.GetBytes(
+                                slotName)),
+                        0);
                 }
 
                 File.WriteAllLines(
@@ -2235,11 +2394,17 @@ namespace PracticeStats
                     configured
                         ? "Attempt- S" +
                           RemainingAttemptStore.ActiveSlot +
-                          " " +
+                          " [" +
+                          RemainingAttemptStore.GetSlotName(
+                              RemainingAttemptStore.ActiveSlot) +
+                          "] " +
                           remaining
                         : "Attempt- S" +
                           RemainingAttemptStore.ActiveSlot +
-                          " --";
+                          " [" +
+                          RemainingAttemptStore.GetSlotName(
+                              RemainingAttemptStore.ActiveSlot) +
+                          "] --";
 
                 if (GlobalAttemptTracker.IsLimitBlocked)
                     remainingText +=
