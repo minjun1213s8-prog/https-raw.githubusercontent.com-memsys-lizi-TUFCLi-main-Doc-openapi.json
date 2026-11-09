@@ -2392,19 +2392,8 @@ namespace PracticeStats
             {
                 remainingText =
                     configured
-                        ? "Attempt- S" +
-                          RemainingAttemptStore.ActiveSlot +
-                          " [" +
-                          RemainingAttemptStore.GetSlotName(
-                              RemainingAttemptStore.ActiveSlot) +
-                          "] " +
-                          remaining
-                        : "Attempt- S" +
-                          RemainingAttemptStore.ActiveSlot +
-                          " [" +
-                          RemainingAttemptStore.GetSlotName(
-                              RemainingAttemptStore.ActiveSlot) +
-                          "] --";
+                        ? "Attempt- " + remaining
+                        : "Attempt- --";
 
                 if (GlobalAttemptTracker.IsLimitBlocked)
                     remainingText +=
