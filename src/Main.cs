@@ -28,10 +28,12 @@ namespace PracticeStats
         public static bool Load(UnityModManager.ModEntry modEntry)
         {
             mod = modEntry;
+            PracticeStatsDataPaths.Initialize();
             LoadVisibility();
             StableAttemptStore.Initialize();
             ResettableAttemptStore.Initialize();
             RemainingAttemptStore.Initialize();
+            PlayTimeStore.Initialize();
             remainingSlotNameText =
                 RemainingAttemptStore.GetSlotName(
                     RemainingAttemptStore.ActiveSlot);
@@ -51,6 +53,7 @@ namespace PracticeStats
             {
                 session.Stop();
                 GlobalAttemptTracker.ReleaseLimitBlock();
+                PlayTimeStore.Flush();
                 RuntimeOverlay.Hide();
                 AttemptPlusOverlay.Hide();
             }
@@ -62,6 +65,7 @@ namespace PracticeStats
         {
             session.Stop();
             GlobalAttemptTracker.ReleaseLimitBlock();
+            PlayTimeStore.Flush();
             RuntimeOverlay.Hide();
             AttemptPlusOverlay.Hide();
             enabled = false;
@@ -89,6 +93,7 @@ namespace PracticeStats
 
                 // Count every gameplay attempt, not only PracticeStats practice.
                 GlobalAttemptTracker.Tick();
+                PlayTimeStore.Tick(deltaTime);
                 UpdateRuntimeOverlay();
                 AttemptPlusOverlay.Update();
             }
@@ -144,7 +149,10 @@ namespace PracticeStats
                 }
                 RGui.Label("Attempts: " + session.TotalAttempts + " / " + session.TargetAttempts);
                 RGui.Label("Attempt: " + ResettableAttemptStore.GetCurrentMapAttempts() + " (resettable per map)");
-                RGui.Label("Attempt+: " + StableAttemptStore.GetCurrentMapAttempts() + " (persistent per map)");
+                RGui.Label(
+                    "Attempt+: " +
+                    PlayTimeStore.GetCurrentMapFormatted() +
+                    " (play time, persistent per map)");
 
                 RGui.Space(6f);
                 RGui.Label("Attempt- limiter");
@@ -356,7 +364,9 @@ namespace PracticeStats
         {
             try
             {
-                visibilityPath = Path.Combine(Path.GetDirectoryName(typeof(Main).Assembly.Location), "PracticeStats_Visibility.dat");
+                visibilityPath = Path.Combine(
+                    PracticeStatsDataPaths.DataDirectory,
+                    "PracticeStats_Visibility.dat");
                 if (!File.Exists(visibilityPath)) return;
                 string[] values = File.ReadAllLines(visibilityPath);
                 if (values.Length >= 3)
@@ -1000,6 +1010,410 @@ namespace PracticeStats
         }
     }
 
+    internal static class PracticeStatsDataPaths
+    {
+        private static bool initialized;
+        private static string dataDirectory;
+
+        public static string DataDirectory
+        {
+            get
+            {
+                Initialize();
+                return dataDirectory;
+            }
+        }
+
+        public static void Initialize()
+        {
+            if (initialized)
+                return;
+
+            initialized = true;
+
+            string assemblyDir =
+                Path.GetDirectoryName(
+                    typeof(Main).Assembly.Location);
+
+            if (string.IsNullOrEmpty(assemblyDir))
+                assemblyDir = ".";
+
+            string modsDir =
+                Directory.GetParent(assemblyDir) != null
+                    ? Directory.GetParent(assemblyDir).FullName
+                    : assemblyDir;
+
+            dataDirectory =
+                Path.Combine(
+                    modsDir,
+                    "PracticeStatsData");
+
+            Directory.CreateDirectory(
+                dataDirectory);
+
+            string[] names =
+            {
+                "PracticeStats_Attempts.dat",
+                "PracticeStats_Attempts.dat.bak",
+                "PracticeStats_ResettableAttempts.dat",
+                "PracticeStats_ResettableAttempts.dat.bak",
+                "PracticeStats_RemainingAttempts.dat",
+                "PracticeStats_RemainingAttempts.dat.bak",
+                "PracticeStats_Visibility.dat",
+                "PracticeStats_PlayTime.dat",
+                "PracticeStats_PlayTime.dat.bak"
+            };
+
+            var sourceDirs =
+                new List<string>();
+
+            sourceDirs.Add(
+                assemblyDir);
+
+            try
+            {
+                foreach (string dir in
+                    Directory.GetDirectories(modsDir))
+                {
+                    string name =
+                        Path.GetFileName(dir);
+
+                    if (string.Equals(
+                            dir,
+                            dataDirectory,
+                            StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    if (!string.IsNullOrEmpty(name) &&
+                        name.StartsWith(
+                            "PracticeStats",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        sourceDirs.Add(dir);
+                    }
+                }
+            }
+            catch { }
+
+            foreach (string fileName in names)
+            {
+                string destination =
+                    Path.Combine(
+                        dataDirectory,
+                        fileName);
+
+                if (File.Exists(destination))
+                    continue;
+
+                foreach (string sourceDir in
+                    sourceDirs.Distinct(
+                        StringComparer.OrdinalIgnoreCase))
+                {
+                    string source =
+                        Path.Combine(
+                            sourceDir,
+                            fileName);
+
+                    if (!File.Exists(source))
+                        continue;
+
+                    try
+                    {
+                        File.Copy(
+                            source,
+                            destination,
+                            false);
+
+                        Main.Log(
+                            "Migrated persistent data: " +
+                            fileName);
+
+                        break;
+                    }
+                    catch { }
+                }
+            }
+        }
+    }
+
+    internal static class PlayTimeStore
+    {
+        private static readonly Dictionary<string, long> milliseconds =
+            new Dictionary<string, long>(
+                StringComparer.OrdinalIgnoreCase);
+
+        private static string filePath;
+        private static string backupPath;
+        private static bool initialized;
+        private static bool dirty;
+        private static bool wasActive;
+        private static float saveAccumulator;
+
+        public static void Initialize()
+        {
+            if (initialized)
+                return;
+
+            initialized = true;
+
+            PracticeStatsDataPaths.Initialize();
+
+            filePath =
+                Path.Combine(
+                    PracticeStatsDataPaths.DataDirectory,
+                    "PracticeStats_PlayTime.dat");
+
+            backupPath =
+                filePath + ".bak";
+
+            if (!LoadFile(filePath))
+                LoadFile(backupPath);
+        }
+
+        public static void Tick(float deltaTime)
+        {
+            Initialize();
+
+            bool active =
+                GameBridge.IsActivePlayTime();
+
+            if (!active)
+            {
+                if (wasActive && dirty)
+                    Save();
+
+                wasActive = false;
+                saveAccumulator = 0f;
+                return;
+            }
+
+            string key =
+                StableAttemptStore.CurrentMapKey();
+
+            if (string.IsNullOrEmpty(key))
+            {
+                wasActive = false;
+                return;
+            }
+
+            float safeDelta =
+                deltaTime;
+
+            if (safeDelta < 0f)
+                safeDelta = 0f;
+
+            // Avoid a large one-frame jump after a hitch or debugger stop.
+            if (safeDelta > 1f)
+                safeDelta = 1f;
+
+            long add =
+                (long)Math.Round(
+                    safeDelta * 1000.0);
+
+            if (add > 0)
+            {
+                long value;
+                milliseconds.TryGetValue(
+                    key,
+                    out value);
+
+                milliseconds[key] =
+                    value + add;
+
+                dirty = true;
+            }
+
+            wasActive = true;
+            saveAccumulator += safeDelta;
+
+            if (dirty &&
+                saveAccumulator >= 5f)
+            {
+                Save();
+                saveAccumulator = 0f;
+            }
+        }
+
+        public static string GetCurrentMapFormatted()
+        {
+            return FormatMilliseconds(
+                GetCurrentMapMilliseconds());
+        }
+
+        public static long GetCurrentMapMilliseconds()
+        {
+            Initialize();
+
+            string key =
+                StableAttemptStore.CurrentMapKey();
+
+            if (string.IsNullOrEmpty(key))
+                return 0L;
+
+            long value;
+            return milliseconds.TryGetValue(
+                key,
+                out value)
+                ? value
+                : 0L;
+        }
+
+        public static void Flush()
+        {
+            Initialize();
+
+            if (dirty)
+                Save();
+        }
+
+        private static string FormatMilliseconds(
+            long value)
+        {
+            if (value < 0)
+                value = 0;
+
+            long totalSeconds =
+                value / 1000L;
+
+            long hours =
+                totalSeconds / 3600L;
+
+            long minutes =
+                (totalSeconds % 3600L) / 60L;
+
+            long seconds =
+                totalSeconds % 60L;
+
+            return hours.ToString("00") +
+                   ":" +
+                   minutes.ToString("00") +
+                   ":" +
+                   seconds.ToString("00");
+        }
+
+        private static bool LoadFile(
+            string path)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(path) ||
+                    !File.Exists(path))
+                    return false;
+
+                int loaded = 0;
+
+                foreach (string rawLine in
+                    File.ReadAllLines(path))
+                {
+                    if (string.IsNullOrWhiteSpace(rawLine))
+                        continue;
+
+                    int tab =
+                        rawLine.LastIndexOf('\t');
+
+                    if (tab <= 0 ||
+                        tab >= rawLine.Length - 1)
+                        continue;
+
+                    string encodedKey =
+                        rawLine.Substring(0, tab);
+
+                    string valueText =
+                        rawLine.Substring(tab + 1);
+
+                    long value;
+
+                    if (!long.TryParse(
+                            valueText,
+                            out value) ||
+                        value < 0)
+                        continue;
+
+                    try
+                    {
+                        string key =
+                            Encoding.UTF8.GetString(
+                                Convert.FromBase64String(
+                                    encodedKey));
+
+                        if (string.IsNullOrWhiteSpace(key))
+                            continue;
+
+                        milliseconds[key] = value;
+                        loaded++;
+                    }
+                    catch { }
+                }
+
+                return loaded > 0 ||
+                       new FileInfo(path).Length == 0;
+            }
+            catch (Exception ex)
+            {
+                Main.Log(
+                    "Attempt+ playtime load error: " +
+                    ex.Message);
+
+                return false;
+            }
+        }
+
+        private static void Save()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(filePath))
+                    return;
+
+                string tempPath =
+                    filePath + ".tmp";
+
+                string[] lines =
+                    milliseconds
+                        .OrderBy(
+                            pair => pair.Key,
+                            StringComparer.OrdinalIgnoreCase)
+                        .Select(pair =>
+                            Convert.ToBase64String(
+                                Encoding.UTF8.GetBytes(
+                                    pair.Key)) +
+                            "\t" +
+                            pair.Value)
+                        .ToArray();
+
+                File.WriteAllLines(
+                    tempPath,
+                    lines);
+
+                if (File.Exists(filePath))
+                {
+                    try
+                    {
+                        File.Copy(
+                            filePath,
+                            backupPath,
+                            true);
+                    }
+                    catch { }
+
+                    File.Delete(filePath);
+                }
+
+                File.Move(
+                    tempPath,
+                    filePath);
+
+                dirty = false;
+            }
+            catch (Exception ex)
+            {
+                Main.Log(
+                    "Attempt+ playtime save error: " +
+                    ex.Message);
+            }
+        }
+    }
+
     internal static class ResettableAttemptStore
     {
         private static readonly Dictionary<string, int> attempts =
@@ -1016,14 +1430,8 @@ namespace PracticeStats
 
             try
             {
-                string dllPath = typeof(Main).Assembly.Location;
-                string dir = Path.GetDirectoryName(dllPath);
-
-                if (string.IsNullOrEmpty(dir))
-                    dir = ".";
-
                 filePath = Path.Combine(
-                    dir,
+                    PracticeStatsDataPaths.DataDirectory,
                     "PracticeStats_ResettableAttempts.dat");
 
                 backupPath = filePath + ".bak";
@@ -1286,14 +1694,8 @@ namespace PracticeStats
 
             try
             {
-                string dllPath = typeof(Main).Assembly.Location;
-                string dir = Path.GetDirectoryName(dllPath);
-
-                if (string.IsNullOrEmpty(dir))
-                    dir = ".";
-
                 filePath = Path.Combine(
-                    dir,
+                    PracticeStatsDataPaths.DataDirectory,
                     "PracticeStats_RemainingAttempts.dat");
 
                 backupPath = filePath + ".bak";
@@ -1813,13 +2215,9 @@ namespace PracticeStats
 
             try
             {
-                string dllPath = typeof(Main).Assembly.Location;
-                string dir = Path.GetDirectoryName(dllPath);
-
-                if (string.IsNullOrEmpty(dir))
-                    dir = ".";
-
-                filePath = Path.Combine(dir, "PracticeStats_Attempts.dat");
+                filePath = Path.Combine(
+                    PracticeStatsDataPaths.DataDirectory,
+                    "PracticeStats_Attempts.dat");
                 backupPath = filePath + ".bak";
 
                 if (!LoadFile(filePath))
@@ -2285,7 +2683,6 @@ namespace PracticeStats
         private static void CountQualifiedAttempt()
         {
             ResettableAttemptStore.RecordAttemptStart();
-            StableAttemptStore.IncrementCurrentMapAttempts();
 
             if (RemainingAttemptStore.IsEnabled)
             {
@@ -2372,9 +2769,8 @@ namespace PracticeStats
                 ResettableAttemptStore.GetCurrentMapAttempts() +
                 pending;
 
-            int attemptPlus =
-                StableAttemptStore.GetCurrentMapAttempts() +
-                pending;
+            string attemptPlus =
+                PlayTimeStore.GetCurrentMapFormatted();
 
             int remaining;
             bool configured =
@@ -3723,6 +4119,57 @@ namespace PracticeStats
                     "-Attempt pause gate error: " +
                     ex.Message);
             }
+        }
+
+        public static bool IsPaused()
+        {
+            object controller = Controller();
+            if (controller == null)
+                return true;
+
+            Resolve();
+
+            if (pausedMember == null)
+                return false;
+
+            try
+            {
+                object raw =
+                    ReflectionUtil.ReadMember(
+                        controller,
+                        pausedMember);
+
+                return raw is bool &&
+                       (bool)raw;
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
+        public static bool IsActivePlayTime()
+        {
+            if (!IsGameplayWorld() ||
+                IsPaused())
+                return false;
+
+            if (EditorBridge.Exists() &&
+                !EditorBridge.IsPlayMode() &&
+                !BuiltInPractice.IsEnabled())
+                return false;
+
+            string state =
+                StateName();
+
+            if (string.IsNullOrEmpty(state))
+                return false;
+
+            // PlayerControl is ADOFAI's actual controllable gameplay state.
+            // Do not count countdown, fail/win screens, menus, or editor idle.
+            return state.IndexOf(
+                       "PlayerControl",
+                       StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         public static int CurrentFloor()
